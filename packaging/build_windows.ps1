@@ -6,23 +6,32 @@
 #>
 param(
   [Parameter(Mandatory = $true)][string]$QtDir,
-  [string]$Version = "1.0.0",
-  [string]$Generator = "Visual Studio 17 2022"
+  [string]$Version = "1.1.0-dev",
+  [string]$Generator = "Visual Studio 17 2022",
+  [string]$VcpkgRoot = ""   # 已装 vcpkg 时填根目录，并先执行 vcpkg install qpdf:x64-windows，即可编进去水印功能
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-cmake -S . -B build -G $Generator -A x64 "-DCMAKE_PREFIX_PATH=$QtDir"
+$tc = @()
+if ($VcpkgRoot) { $tc = @("-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot\scripts\buildsystems\vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=x64-windows") }
+cmake -S . -B build -G $Generator -A x64 "-DCMAKE_PREFIX_PATH=$QtDir" @tc
 cmake --build build --config Release
 # 核心测试（含中文路径用例）；界面测试依赖 poppler 的 pdfinfo，Windows 上跳过
-ctest --test-dir build -C Release -R core --output-on-failure
+ctest --test-dir build -C Release -R "core|wm" --output-on-failure
 
 $deploy = Join-Path $root "dist\app"
 if (Test-Path $deploy) { Remove-Item $deploy -Recurse -Force }
 New-Item -ItemType Directory -Path $deploy | Out-Null
 Copy-Item build\Release\plt_gui.exe $deploy
 Copy-Item build\Release\plt2pdf.exe $deploy
+if (Test-Path build\Release\pdfwm.exe) {
+  # 去水印命令行 + QPDF 运行库（vcpkg 会把依赖 DLL 放在可执行文件旁边）
+  Copy-Item build\Release\pdfwm.exe $deploy
+  Get-ChildItem build\Release\*.dll | Where-Object { $_.Name -notmatch "^Qt" } | Copy-Item -Destination $deploy
+  Copy-Item packaging\watermark_drop.bat $deploy
+} else { Write-Warning "未编译 pdfwm（缺少 QPDF），安装包不含去水印功能" }
 & "$QtDir\bin\windeployqt.exe" --release --no-translations --no-opengl-sw (Join-Path $deploy "plt_gui.exe")
 
 $zip = Join-Path $root "dist\PLT-Converter-portable-$Version.zip"

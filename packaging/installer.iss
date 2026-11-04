@@ -1,6 +1,6 @@
-﻿; Inno Setup 6 script. Build with:  iscc /DAppVersion=1.0.0 /DDeployDir=<folder produced by windeployqt> packaging\installer.iss
+﻿; Inno Setup 6 script. Build with:  iscc /DAppVersion=1.1.0-dev /DDeployDir=<folder produced by windeployqt> packaging\installer.iss
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0-dev"
 #endif
 #ifndef DeployDir
   #define DeployDir "..\dist\app"
@@ -34,6 +34,7 @@ Source: "{#DeployDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion 
 [Icons]
 Name: "{autoprograms}\PLT 排版转换器"; Filename: "{app}\plt_gui.exe"
 Name: "{autodesktop}\PLT 排版转换器"; Filename: "{app}\plt_gui.exe"; Tasks: desktopicon
+Name: "{autoprograms}\去水印（把PDF拖到这里）"; Filename: "{app}\watermark_drop.bat"; Comment: "实验功能：把带水印的纸样 PDF 拖到这里"
 
 [Run]
 Filename: "{app}\plt_gui.exe"; Description: "运行 PLT 排版转换器"; Flags: nowait postinstall skipifsilent

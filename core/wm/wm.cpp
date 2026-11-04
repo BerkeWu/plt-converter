@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -360,7 +361,7 @@ void detectBitmap(Analysis& A) {
 }
 
 bool load(QPDF& pdf, const std::filesystem::path& in, std::string& err) {
-    try { pdf.processFile(in.u8string().c_str()); return true; }
+    try { pdf.processFile(toU8(in).c_str()); return true; }
     catch (std::exception& e) { err = e.what(); return false; }
 }
 
@@ -542,7 +543,7 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                 }
             }
         }
-        QPDFWriter w(pdf, out.u8string().c_str());
+        QPDFWriter w(pdf, toU8(out).c_str());
         w.setCompressStreams(true);
         w.setDecodeLevel(qpdf_dl_none);
         w.write();

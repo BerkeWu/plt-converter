@@ -15,11 +15,15 @@ jobs:
           target: desktop
           arch: win64_msvc2019_64
           cache: true
+      - name: Install QPDF (vcpkg)
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install qpdf:x64-windows --clean-after-build
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build, test, deploy, package
         shell: pwsh
-        run: .\packaging\build_windows.ps1 -QtDir "$env:QT_ROOT_DIR"
+        run: .\packaging\build_windows.ps1 -QtDir "$env:QT_ROOT_DIR" -VcpkgRoot "$env:VCPKG_INSTALLATION_ROOT"
       - uses: actions/upload-artifact@v4
         with:
           name: PLT-Converter-windows

@@ -18,7 +18,7 @@ public:
     void handleEOF() override {}
 };
 static Hist hist(const std::filesystem::path& p) {
-    Hist h; QPDF q; q.processFile(p.u8string().c_str());
+    Hist h; QPDF q; q.processFile(wm::toU8(p).c_str());
     QPDFPageDocumentHelper d(q); d.pushInheritedAttributesToPage();
     for (auto& pg : d.getAllPages()) {
         ++h.pages; Cb cb; cb.m = &h.ops; pg.parseContents(&cb);

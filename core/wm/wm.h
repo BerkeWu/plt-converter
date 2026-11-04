@@ -10,6 +10,16 @@
 
 namespace wm {
 
+// UTF-8 <-> path helpers that compile in C++17 and C++20 (QPDF 12 headers need C++20, where u8string() returns char8_t).
+inline std::string toU8(const std::filesystem::path& p) { auto s = p.u8string(); return std::string(s.begin(), s.end()); }
+inline std::filesystem::path fromU8(const std::string& s) {
+#if (defined(__cplusplus) && __cplusplus >= 202002L) || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+    return std::filesystem::path(std::u8string(s.begin(), s.end()));
+#else
+    return std::filesystem::u8path(s);
+#endif
+}
+
 enum class Kind { ArtifactObject, FlatText, PageStamp, Bitmap };
 enum class Tier { High, Confirm, Keep, Unsupported };   // High = removed by default
 

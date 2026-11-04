@@ -140,3 +140,6 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 **构建**：需要 libqpdf（Ubuntu：`apt install libqpdf-dev`）。缺库时 CMake 自动跳过 pltwm / pdfwm / test_wm。Windows 打包尚未带上 QPDF（下一步：GitHub Actions 里用 vcpkg 安装 qpdf，并把 qpdf29.dll 等放进安装包）。
 
 **已知缺口**：样例 B（同层店铺信息栏）需要“范围扩展”；D 样例第 3 页仍有约 4900 个浅灰像素，可能是纸样里本来就有的深灰圆环，待查；GBK 编码的联系方式关键词（微信、小红书）暂不能识别，目前只靠 ASCII 账号模式；输出文件名与保存位置、界面接入未做。
+
+**打包（第八轮补充）**：分支版本号为 1.1.0-dev（`VERSION`、安装脚本、构建脚本一致），安装包名 `PLT-Converter-Setup-1.1.0-dev.exe`，与正式 1.0.0 区分。GitHub Actions 里先用 vcpkg 装 `qpdf:x64-windows`，`build_windows.ps1 -VcpkgRoot` 把 vcpkg 工具链传给 CMake，并把 `pdfwm.exe` 与 QPDF 运行库复制进安装目录。安装包里新增开始菜单项“去水印（把PDF拖到这里）”，对应 `watermark_drop.bat`：先显示检测结果，再把去水印后的文件写到原文件旁边（`原名_去水印.pdf`），不覆盖原文件。界面尚未接入，这是给实机验证用的临时入口。
+**未在 Windows 上验证**：QPDF 头文件在 vcpkg 最新版（12.x）需要 C++20，所以水印库单独按 C++20 编译，其余仍是 C++17；Linux 上已用 QPDF 11.9 通过测试，12.x 的接口差异需在 Actions 里确认。
