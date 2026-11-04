@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/plt2pdf.dir/tools/plt2pdf.cpp.o -o plt2pdf  libpltcore.a 

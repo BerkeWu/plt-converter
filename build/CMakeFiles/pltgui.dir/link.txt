@@ -1,2 +1,0 @@
-/usr/bin/ar qc libpltgui.a CMakeFiles/pltgui.dir/pltgui_autogen/mocs_compilation.cpp.o CMakeFiles/pltgui.dir/qt/BatchCore.cpp.o CMakeFiles/pltgui.dir/qt/MainWindowBatch.cpp.o CMakeFiles/pltgui.dir/qt/MainWindow.cpp.o CMakeFiles/pltgui.dir/qt/CanvasWidget.cpp.o CMakeFiles/pltgui.dir/qt/PageRender.cpp.o CMakeFiles/pltgui.dir/qt/PdfExporterQt.cpp.o
-/usr/bin/ranlib libpltgui.a
