@@ -119,3 +119,11 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 **批量转换**：导出、缩略图、页数估算、优化提示、逐一预览全部走同一个引擎，随之调整；批量测试（20 文件上限、损坏文件隔离、方向与穷举一致、暂停取消重试、优化提示交互）全部通过。
 
 **注意**：样例 PDF 80.pdf 带有第三方店铺的斜铺水印，只用作拼接版式参考，没有对它做任何处理。
+
+
+## 第九轮：批量「逐一预览」补齐图形功能 + 提示条遮挡（v1.0.1，分支 fix/batch-preview）
+- 用户反馈：批量逐一预览缺「忽略纸张边框」「框选区域」，且预览框底部提示文字遮挡图形。
+- 排查：这两个功能在批量里数据通路本来就通（`State.ignoreFrame/hasSel/sel/selClip` → `deriveState` → 导出走 `buildFullDoc/cropWorkDoc`），问题是入口难发现：共用的导入面板在批量里带着单文件才需要的说明/文件信息，控件被挤到滚动区外。
+- 改动：`MainWindow::syncUi` 批量下隐藏 `impDrag_/impInfo_`；页签改名「图形与选区」并在有图形编辑时加「●」；信息卡新增 `bu_.shapeNote`（`shapeSummary()`）。
+- 提示条：`CanvasWidget` 新增 `reserve_/viewH()`，提示条占用底部独立条带，`refit/actualSize/focusCell/比例尺/可见区域` 全部改用 `viewH()`，绘制裁剪到上方区域。
+- 测试：`tests/test_batch.cpp` 增加逐一预览的忽略边框 / 框选 / 摘要 / 撤销用例。ctest 3/3 通过（Qt 6 offscreen）。

@@ -1,6 +1,6 @@
-﻿; Inno Setup 6 script. Build with:  iscc /DAppVersion=1.0.0 /DDeployDir=<folder produced by windeployqt> packaging\installer.iss
+﻿; Inno Setup 6 script. Build with:  iscc /DAppVersion=1.0.1 /DDeployDir=<folder produced by windeployqt> packaging\installer.iss
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.0.1"
 #endif
 #ifndef DeployDir
   #define DeployDir "..\dist\app"

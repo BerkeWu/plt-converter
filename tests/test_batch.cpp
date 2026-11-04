@@ -3,7 +3,9 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QCheckBox>
 #include <QFile>
+#include <QLabel>
 #include <QFileInfo>
 #include <QProcess>
 #include <QPushButton>
@@ -165,6 +167,48 @@ int main(int argc, char** argv) {
         CHECK(w.state().offX == 100, "…and it is undoable");
         w.batchActivate(0);
         for (int g = 0; g < 100 && !(w.batchItems()[0]->doc && w.planValid()); ++g) pump(60);
+    }
+    {   // 「忽略纸张边框」「框选区域」 in the per-file preview (v1.0.1): same controls and effect as the single-file mode
+        int fi = -1;
+        for (int i = 0; i < w.batchItems().size(); ++i) if (w.batchItems()[i]->valid() && w.batchItems()[i]->frameIdx >= 0) { fi = i; break; }
+        if (fi >= 0) {
+            w.batchActivate(fi);
+            for (int g = 0; g < 100 && !(w.batchItems()[fi]->doc && w.planValid()); ++g) pump(60);
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text().startsWith(QObject::tr("图形")) && b->isVisibleTo(&w)) { b->click(); break; }
+            pump(300);
+            QCheckBox* cb = nullptr;
+            for (auto* c : w.findChildren<QCheckBox*>()) if (c->text().startsWith(QObject::tr("忽略纸张边框"))) cb = c;
+            CHECK(cb && cb->isVisibleTo(&w) && cb->isEnabled(), "per-file preview shows 「忽略纸张边框」");
+            QPushButton* selB = nullptr;
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text() == QObject::tr("框选区域")) selB = b;
+            CHECK(selB && selB->isVisibleTo(&w) && selB->isEnabled(), "per-file preview shows 「框选区域」");
+            auto hasNote = [&](const QString& key) {
+                for (auto* l : w.findChildren<QLabel*>()) if (l->isVisibleTo(&w) && l->text().contains(key)) return true;
+                return false;
+            };
+            CHECK(hasNote(QObject::tr("检测到纸张边框")), "a detected frame is pointed out on the file card");
+            if (cb) cb->click();
+            pump(500);
+            CHECK(w.state().ignoreFrame && w.batchItems()[fi]->state.ignoreFrame, "ignore-frame is stored on this file only");
+            CHECK(hasNote(QObject::tr("忽略纸张边框")) && !hasNote(QObject::tr("检测到纸张边框")), "the file card summarises the edit");
+            bool othersKeep = true;
+            for (int i = 0; i < w.batchItems().size(); ++i) if (i != fi && w.batchItems()[i]->state.ignoreFrame) othersKeep = false;
+            CHECK(othersKeep, "other files keep their frame");
+            // selection: clip to the left half of the drawing
+            const int full = w.pageCount();
+            w.edit([](State& s) { s.hasSel = true; s.sel = QRectF(0, 0, 150, 400); s.offX = s.offY = 0; });
+            waitPlan(w);
+            pump(300);
+            CHECK(w.batchItems()[fi]->state.hasSel, "selection is stored on this file");
+            CHECK(w.pageCount() > 0 && w.pageCount() < full, "selection shrinks the page count in the preview");
+            CHECK(hasNote(QObject::tr("框选")), "selection appears in the file summary");
+            w.undo(); w.undo();
+            waitPlan(w);
+            CHECK(!w.state().hasSel && !w.state().ignoreFrame, "…both are undoable per file");
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text().startsWith(QObject::tr("排版")) && b->isVisibleTo(&w)) { b->click(); break; }
+            w.batchActivate(0);
+            for (int g = 0; g < 100 && !(w.batchItems()[0]->doc && w.planValid()); ++g) pump(60);
+        } else CHECK(false, "test data has a file with a paper frame");
     }
     w.batchConfirmAll();
     int confirmed = 0;

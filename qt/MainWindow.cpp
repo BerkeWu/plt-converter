@@ -342,7 +342,8 @@ QWidget* MainWindow::buildImportPanel() {
     openBtn_ = primaryButton(tr("选择 PLT 文件…"));
     connect(openBtn_, &QPushButton::clicked, this, &MainWindow::chooseFile);
     l->addWidget(openBtn_);
-    l->addWidget(noteLabel(tr("也可以把 .plt 文件拖到窗口任意位置。扩展名不区分大小写，支持中文和空格路径。")));
+    impDrag_ = noteLabel(tr("也可以把 .plt 文件拖到窗口任意位置。扩展名不区分大小写，支持中文和空格路径。"));
+    l->addWidget(impDrag_);
     busy_ = new QProgressBar;
     busy_->setRange(0, 0);
     busy_->setTextVisible(false);
@@ -961,6 +962,10 @@ void MainWindow::syncUi() {
     toLayoutBtn_->setEnabled(loadedDoc);
     toLayoutBtn_->setVisible(!batch_);
     openBtn_->setVisible(!batch_);
+    // in the batch per-file preview the file info is in the header and files are managed in the queue,
+    // so the panel only keeps the graphic controls and fits on one screen
+    impDrag_->setVisible(!batch_);
+    impInfo_->setVisible(!batch_);
     if (auto* tb = leftStack_->findChild<QPushButton*>("toBatchBtn")) tb->setVisible(!batch_);
 
     // layout panel

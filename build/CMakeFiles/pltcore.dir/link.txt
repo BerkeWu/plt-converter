@@ -1,0 +1,2 @@
+/usr/bin/ar qc libpltcore.a CMakeFiles/pltcore.dir/core/plt.cpp.o CMakeFiles/pltcore.dir/core/layout.cpp.o CMakeFiles/pltcore.dir/core/pdf_min.cpp.o CMakeFiles/pltcore.dir/core/docops.cpp.o
+/usr/bin/ranlib libpltcore.a

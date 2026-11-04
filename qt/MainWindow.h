@@ -105,7 +105,7 @@ struct BatchUi {
     QWidget *queueBox = nullptr, *rightHost = nullptr, *leftHost = nullptr, *infoBox = nullptr, *actionBox = nullptr, *toggleBar = nullptr, *bottomBar = nullptr;
     QComboBox* filter = nullptr;
     QListWidget* queueList = nullptr;
-    QLabel *posLbl = nullptr, *compare = nullptr, *hintLbl = nullptr, *sumLbl = nullptr, *overrideNote = nullptr;
+    QLabel *posLbl = nullptr, *compare = nullptr, *hintLbl = nullptr, *sumLbl = nullptr, *overrideNote = nullptr, *shapeNote = nullptr;
     QPushButton *prev = nullptr, *next = nullptr, *applyHint = nullptr, *confirm = nullptr, *restoreAuto = nullptr, *restoreTmpl = nullptr, *applyFollow = nullptr, *confirmAll = nullptr, *exportBtn = nullptr, *tabLayout = nullptr, *tabShape = nullptr;
     // step 5: export
     QRadioButton *outSource = nullptr, *outCustom = nullptr;
@@ -181,6 +181,7 @@ private:
     QWidget* buildBatchBottomBar();
     QWidget* buildBatchToggleBar();
     void setBatchTab(bool shape);
+    QString shapeSummary(const State& s, bool frameDetected) const;
     void batchAddDialog(bool folder);
     QWidget* buildBatchAddPanel();
     QWidget* buildBatchAutoPanel();
@@ -329,6 +330,7 @@ private:
     QPushButton *openBtn_ = nullptr, *selBtn_ = nullptr, *clearSelBtn_ = nullptr, *toLayoutBtn_ = nullptr, *resetXformBtn_ = nullptr;
     QProgressBar* busy_ = nullptr;
     QLabel *impInfo_ = nullptr, *impNotes_ = nullptr, *xformNote_ = nullptr, *selInfo_ = nullptr;
+    QLabel* impDrag_ = nullptr;   // single-file hint about dropping files (hidden in batch)
     QCheckBox* ignoreFrame_ = nullptr;
     QLabel* frameNote_ = nullptr;
     QRadioButton *clipRadio_ = nullptr, *wholeRadio_ = nullptr;

@@ -108,7 +108,7 @@ QWidget* MainWindow::buildBatchToggleBar() {
     auto* l = new QHBoxLayout(w);
     l->setContentsMargins(12, 8, 12, 4);
     bu_.tabLayout = plainButton(tr("排版"));
-    bu_.tabShape = plainButton(tr("图形"));
+    bu_.tabShape = plainButton(tr("图形与选区"));
     bu_.tabShape->setToolTip(tr("旋转 / 镜像 / 忽略纸张边框 / 框选区域"));
     for (auto* b : {bu_.tabLayout, bu_.tabShape}) { b->setCheckable(true); b->setProperty("seg", true); l->addWidget(b); }
     auto* g = new QButtonGroup(w);
@@ -192,6 +192,8 @@ QWidget* MainWindow::buildBatchRightHost() {
     il->addWidget(card);
     bu_.overrideNote = noteLabel();
     il->addWidget(bu_.overrideNote);
+    bu_.shapeNote = noteLabel();
+    il->addWidget(bu_.shapeNote);
     bu_.infoBox = info;
     l->addWidget(info);
     // (index 1 is filled with sideHolder_ by batchChrome)
@@ -784,6 +786,22 @@ void MainWindow::setBatchTab(bool shape) {
     updateTip();
 }
 
+// One line per per-file graphic edit, so it is visible from either tab what was changed on this file.
+QString MainWindow::shapeSummary(const State& s, bool frameDetected) const {
+    QStringList on;
+    if (s.ignoreFrame) on << tr("忽略纸张边框");
+    if (s.rot) on << tr("旋转 %1°").arg(s.rot * 90);
+    if (s.mirror) on << tr("水平镜像");
+    if (s.hasSel) on << tr("框选 %1 × %2 mm（%3）").arg(s.sel.width(), 0, 'f', 0).arg(s.sel.height(), 0, 'f', 0).arg(s.selClip ? tr("按边界裁剪") : tr("整条保留"));
+    QString t;
+    if (!on.isEmpty()) t = tr("✎ 本文件图形：%1。").arg(on.join(tr(" · ")));
+    if (frameDetected && !s.ignoreFrame) {
+        if (!t.isEmpty()) t += QLatin1Char('\n');
+        t += tr("检测到纸张边框，可在「图形与选区」页勾选忽略。");
+    }
+    return t;
+}
+
 // ============================================================================ table / lists
 
 QString MainWindow::statusText(const BatchItem& it) const {
@@ -1257,6 +1275,13 @@ void MainWindow::updateBatchInfo() {
     }
     const bool over = isOverridden(it, tmpl_);
     bu_.overrideNote->setText(over ? tr("✎ 本文件已覆盖通用参数。") : tr("本文件参数继承通用设置：%1 · 边距 %2 · 重叠 %3 · 页码%4。").arg(tmpl_.paper).arg(tmpl_.margin).arg(tmpl_.overlap).arg(tmpl_.pageNumbers ? tr("开启") : tr("关闭")));
+    {
+        const QString sn = shapeSummary(s_, it.frameIdx >= 0);
+        bu_.shapeNote->setText(sn);
+        bu_.shapeNote->setVisible(!sn.isEmpty());
+        const bool edited = s_.ignoreFrame || s_.rot || s_.mirror || s_.hasSel;
+        bu_.tabShape->setText(edited ? tr("图形与选区 ●") : tr("图形与选区"));
+    }
     bu_.restoreTmpl->setEnabled(over);
     bu_.restoreAuto->setEnabled(it.haveAuto && s_ != it.autoState);
     bu_.applyFollow->setEnabled(pos >= 0 && pos + 1 < order.size());
