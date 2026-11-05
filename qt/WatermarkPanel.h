@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 
+#include "plt.h"
 #include "wm/wm.h"
 
 class DrawView;
@@ -36,6 +37,11 @@ struct WmFile {
     Status status = Pending;
     QString note;
     wm::FileResult res;
+    // PLT files (stroke-drawn labels are removed from the PLT itself; the output is a PLT again)
+    bool isPlt = false;
+    std::shared_ptr<plt::Document> pltDoc;
+    std::shared_ptr<std::string> pltData;
+    QString outPath;
 };
 
 class WatermarkPanel : public QWidget {
@@ -50,6 +56,8 @@ public:
     const QVector<WmFile>& files() const { return files_; }
     int groupCount() const { return nGroups_; }
     bool hasManualGroup() const { return manual_ >= 0; }
+    int pltGroup() const { return pltGroup_; }
+    QStringList cleanedPltFiles() const;                    // outputs of PLT files that were processed successfully
     wm::Recipe& recipe(int group) { return recipes_[group]; }
     int currentGroup() const { return curGroup_; }
     void selectGroup(int g);
@@ -78,6 +86,7 @@ signals:
     void leaveRequested(bool batchConversion);              // user switched to 单文件 / 批量转换
     void filesAnalyzed();
     void runFinished();
+    void convertRequested(const QStringList& pltFiles);     // 去水印后进入 PLT 转 PDF（Ctrl+Enter）
 
 protected:
     void dragEnterEvent(QDragEnterEvent*) override;
@@ -92,6 +101,8 @@ private:
     QWidget* buildBottom();
     void async(std::function<void()> work, std::function<void()> done);
     void onAnalyzed(int i, const wm::Report& r);
+    std::shared_ptr<wm::PageDrawing> pltDrawing(const WmFile& f, const std::vector<size_t>& skip, QPointF* origin) const;
+    std::vector<size_t> pltRemovalLines(const WmFile& f, const wm::Recipe& rc) const;
     void regroup();
     void refreshTables();
     void refreshGroups();
@@ -140,11 +151,13 @@ private:
     QProgressBar* runBar_ = nullptr;
     QLabel* runInfo_ = nullptr;
     QTableWidget* runTable_ = nullptr;
-    QPushButton *runStart_ = nullptr, *runCancel_ = nullptr, *runCsv_ = nullptr, *runOpen_ = nullptr;
+    QPushButton *runStart_ = nullptr, *runCancel_ = nullptr, *runCsv_ = nullptr, *runOpen_ = nullptr, *runConvert_ = nullptr;
+    QPointF pltOrigin_;          // maps preview coordinates back to PLT millimetres (x = px + ox, y = oy - py)
+    double pltPad_ = 10;
 
     // data
     QVector<WmFile> files_;
-    int nGroups_ = 0, manual_ = -1, curGroup_ = 0, sample_ = -1, page_ = 1;
+    int nGroups_ = 0, manual_ = -1, pltGroup_ = -1, curGroup_ = 0, sample_ = -1, page_ = 1;
     std::vector<std::string> sigs_;
     QVector<wm::Recipe> recipes_;
     QHash<int, std::vector<int>> extra_;          // file index -> ticked "需确认" finding indices

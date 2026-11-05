@@ -28,7 +28,13 @@ struct State {
     Polyline open;
     bool hasOpen = false;
     std::vector<Polyline> out;
+    Span cmd;                 // the command being executed (for Polyline::src)
+    bool cmdIsArc = false;
 
+    void note(Polyline& l) {
+        if (cmdIsArc) l.editable = false;
+        else if (l.src.empty() || l.src.back().a != cmd.a) l.src.push_back(cmd);
+    }
     void closeLine() {
         if (hasOpen && open.pts.size() >= 2) out.push_back(open);
         open.pts.clear();
@@ -39,11 +45,13 @@ struct State {
             if (!hasOpen) {
                 open.pen = pen;
                 open.pts.clear();
+                open.src.clear();
+                open.editable = true;
                 open.pts.push_back(cur);
                 hasOpen = true;
             }
             const Pt& last = open.pts.back();
-            if (last.x != p.x || last.y != p.y) open.pts.push_back(p);  // drop zero-length segments
+            if (last.x != p.x || last.y != p.y) { open.pts.push_back(p); note(open); }  // drop zero-length segments
         } else {
             closeLine();
         }
@@ -84,6 +92,7 @@ Document parseString(const std::string& data) {
             c.pts.push_back({st.cur.x + r * std::cos(a), st.cur.y + r * std::sin(a)});
         }
         st.closeLine();
+        c.src.push_back(st.cmd);
         st.out.push_back(c);
     };
 
@@ -121,6 +130,7 @@ Document parseString(const std::string& data) {
         if (ch == ';' || ch <= ' ') { ++i; continue; }
         if (!(ch >= 'A' && ch <= 'Z') && !(ch >= 'a' && ch <= 'z')) { ++i; continue; }  // stray byte
         if (i + 1 >= n) break;
+        const size_t cmdStart = i;
         std::string mn;
         mn += static_cast<char>(std::toupper(ch));
         mn += static_cast<char>(std::toupper(static_cast<unsigned char>(data[i + 1])));
@@ -139,6 +149,10 @@ Document parseString(const std::string& data) {
         std::string args = data.substr(i, j - i);
         i = (j < n) ? j + 1 : j;
         std::vector<double> a = parseNumbers(args);
+        st.cmd.a = cmdStart;
+        st.cmd.b = i;
+        st.cmd.kind = mn == "PD" ? 'D' : mn == "PA" ? 'A' : mn == "PR" ? 'R' : 'X';
+        st.cmdIsArc = mn == "AA" || mn == "AR" || mn == "AT" || mn == "RT";
 
         if (mn == "IN") {
             st.closeLine(); st.penDown = false; st.relative = false; st.cur = {0, 0};
@@ -179,6 +193,7 @@ Document parseString(const std::string& data) {
                 r.pen = st.pen;
                 r.pts = {s0, {e.x, s0.y}, e, {s0.x, e.y}, s0};
                 st.closeLine();
+                r.src.push_back(st.cmd);
                 st.out.push_back(r);
             }
         } else if (mn == "CR") {  // colour range for PC

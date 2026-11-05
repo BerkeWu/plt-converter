@@ -180,3 +180,11 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - Qt：`qt/WatermarkPanel`（三步）、`qt/DrawView`（预览 + 橡皮筋框选，原图/去除后的差异用「图元几何键」多重集合比较，不需要逐项目关联）。MainWindow 用 QStackedWidget 包了一层，顶栏第三个模式按钮；`plt_gui --watermark [文件…]` 直接进入。
 - 测试：`test_wm`（分组、配方存取、吻合度、校验、模板）、`test_wmgui`（20 个上限、完整流程含框选图形与文字、不覆盖原件、嵌入主窗口）。ctest 5/5。
 - 取舍/限制：①「需确认」项只能在单文件（组内只有 1 个文件）时勾选并一并去除，批量只自动去除「默认去除」项；②配方里的指定文字对同组文件按子串匹配，图形模板按形状匹配，二者不依赖检测；③预览不是位图渲染：不画图片内容、渐变/图案、剪裁路径，页面旋转（/Rotate）未处理，无 ToUnicode 的 GBK 字体文字显示为空；④批量按顺序单线程处理，20 个文件取决于页数；⑤Windows 打包/QPDF 12 未实机验证；⑥吻合度是启发式（均分 − 30×缺失 − 8×多余）。
+
+
+## 第十四轮：PLT 线条字去除（用户需求：处理 plt 中「小红叶」类文字，输出仍为 plt，可快捷键进入 plt 转 pdf）
+- 解析器 `core/plt.cpp` 为每条折线记录源文本区间（`Polyline.src`）和是否可编辑（`editable`；含 AA/AR/AT/RT 圆弧的线不可编辑）。
+- `core/pltedit.cpp`：`extractTemplate`（框内完整落入的线 = 模板）、`findTemplateCopies`（相似变换匹配：镜像×4 旋转×正反方向，最小二乘缩放 0.3–3 倍，≥3 点锚笔画，网格索引，容差 0.12 mm）、`removeLines`（不重新生成文件：PD→PU，PA/PR 包成 `PU;…PD;`，CI/EA/ER 丢弃，其余字节不动，笔位不变，所以后面的相对移动仍正确）。
+- `WatermarkPanel`：`.plt` 进入「PLT」组；预览用 plt::Document 在内存里画前/后（单位 mm，四周留 10 mm）；框选坐标换算回 mm；运行时每个文件按配方里的图形模板找线 → `removeLines` → 重新解析校验线条数 = 原有 − 去除数 → 写 `原名_去水印.plt`。第三步出现「转 PLT→PDF（n 个）· Ctrl+Enter」，发出 `convertRequested`，MainWindow 接上：1 个文件→`loadFile`（单文件模式），多个→批量转换 `addBatchFiles`。
+- 测试：test_core（PLT 块：相对移动、镜像/放大/旋转 180、弧不可编辑、模板复用）、test_wmgui `pltLabelFlow`（3 个 PLT、含 1.5 倍副本、框选→运行→输出可解析→原件不变→Ctrl+Enter 离开水印页）。
+- 未验证：真实 CAD 导出的带「小红叶」PLT（字符可能用圆弧/曲线或点很多的笔画，需要样本）；Windows 实机；Ctrl+Enter 在批量页是否与既有快捷键冲突（未发现）。

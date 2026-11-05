@@ -1484,6 +1484,13 @@ WatermarkPanel* MainWindow::watermarkPanel() {
         wmPanel_ = new WatermarkPanel;
         rootStack_->addWidget(wmPanel_);
         connect(wmPanel_, &WatermarkPanel::leaveRequested, this, [this](bool batch) { showWatermark(false); setBatchMode(batch); });
+        // 去水印后的 PLT 直接进入 PLT→PDF：一个文件走单文件流程，多个文件走批量转换
+        connect(wmPanel_, &WatermarkPanel::convertRequested, this, [this](const QStringList& plts) {
+            if (plts.isEmpty()) return;
+            showWatermark(false);
+            if (plts.size() == 1) { setBatchMode(false); loadFile(plts[0]); }
+            else { setBatchMode(true); addBatchFiles(plts); }
+        });
     }
     return wmPanel_;
 }

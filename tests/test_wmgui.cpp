@@ -9,6 +9,7 @@
 
 #include "DrawView.h"
 #include "MainWindow.h"
+#include "plt.h"
 #include "WatermarkPanel.h"
 
 static void waitIdle(WatermarkPanel& p, int ms = 60000) {
@@ -117,6 +118,106 @@ private slots:
         p.startRun();
         QVERIFY(done2.wait(120000));
         QVERIFY(QFileInfo::exists(out + QString::fromUtf8("/C_flat_去水印(2).pdf")));
+    }
+
+    void styledShots() {   // screenshots of the three steps inside the main window (with the application style)
+        MainWindow w;
+        w.resize(1360, 820);
+        w.show();
+        w.showWatermark(true);
+        QTemporaryDir td;
+        for (auto n : {"C_flat.pdf", "D_flat.pdf", "B_block.pdf", "A_clean.pdf", "E_bitmap.pdf", "H_vector_text.pdf"}) QFile::copy(data_ + "/" + n, td.filePath(n));
+        auto* p = w.watermarkPanel();
+        p->addFiles({td.path()});
+        waitIdle(*p);
+        w.grab().save("/tmp/claude-0/shots/s1_add.png");
+        p->goStep(1); p->selectGroup(0); waitIdle(*p);
+        w.grab().save("/tmp/claude-0/shots/s2_review.png");
+        p->selectGroup(p->groupCount() - 1);
+        for (int i = 0; i < p->files().size(); ++i) if (p->files()[i].name == "H_vector_text.pdf") p->setSample(i);
+        p->setPage(2); waitIdle(*p);
+        p->boxShape(315, 590, 365, 712); waitIdle(*p);
+        p->commitShape("小红叶"); waitIdle(*p);
+        w.grab().save("/tmp/claude-0/shots/s3_shape.png");
+        for (int i = 0; i < p->files().size(); ++i) if (p->files()[i].name == "H_vector_text.pdf") p->setFileSelected(i, true);
+        p->setOutputDir(td.filePath("out"));
+        QSignalSpy done(p, &WatermarkPanel::runFinished);
+        p->startRun();
+        QVERIFY(done.wait(120000));
+        waitIdle(*p);
+        w.grab().save("/tmp/claude-0/shots/s4_run.png");
+    }
+
+    // PLT: stroke-drawn labels ("小红叶") are removed from the PLT itself, the output is a PLT, Ctrl+Enter goes on to PLT->PDF
+    static QByteArray pltWithLabels(const std::vector<std::pair<double, double>>& at, double sc) {
+        const std::vector<std::vector<std::pair<double, double>>> glyph = {
+            {{0, 0}, {8, 0}, {8, 5}, {0, 5}, {0, 0}}, {{2, 1}, {6, 4}}, {{2, 4}, {6, 1}, {7, 6}}, {{1, 7}, {9, 7}}};
+        auto u = [](double mm) { return QString::number(qRound(mm * 40)); };
+        QString o = "IN;SP1;PU0,0;PD0,16000,16000,16000,16000,0,0,0;PU;PU1000,1000;PD1000,3000;PU;";
+        for (auto& a : at)
+            for (auto& g : glyph) {
+                o += "PU" + u(a.first + g[0].first * sc) + "," + u(a.second + g[0].second * sc) + ";PD";
+                for (size_t k = 1; k < g.size(); ++k) o += (k > 1 ? "," : "") + u(a.first + g[k].first * sc) + "," + u(a.second + g[k].second * sc);
+                o += ";";
+            }
+        o += "PU;";
+        return o.toLatin1();
+    }
+
+    void pltLabelFlow() {
+        QTemporaryDir td;
+        QStringList paths;
+        const std::vector<std::vector<std::pair<double, double>>> pos = {{{100, 100}, {250, 200}}, {{120, 150}}, {{60, 60}, {300, 300}, {200, 120}}};
+        for (size_t i = 0; i < pos.size(); ++i) {
+            QFile f(td.filePath(QString("p%1.plt").arg(i)));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(pltWithLabels(pos[i], i == 1 ? 1.5 : 1.0));
+            f.close();
+            paths << f.fileName();
+        }
+        MainWindow w;
+        w.resize(1360, 820);
+        w.show();
+        w.showWatermark(true);
+        auto* p = w.watermarkPanel();
+        QCOMPARE(p->addFiles(paths), 3);
+        waitIdle(*p);
+        QVERIFY(p->pltGroup() >= 0);
+        for (auto& f : p->files()) { QVERIFY(f.isPlt); QCOMPARE(f.group, p->pltGroup()); QVERIFY(f.pltDoc); }
+        p->goStep(1); p->selectGroup(p->pltGroup());
+        p->setSample(0); waitIdle(*p);
+        // box the first label of p0 (preview coordinates: x = mm - ox, y = oy - mm)
+        const auto& b = p->files()[0].pltDoc->bounds;
+        const double ox = b.minX - 10, oy = b.maxY + 10;
+        p->boxShape(98 - ox, oy - 108, 112 - ox, oy - 98); waitIdle(*p);
+        QVERIFY2(!p->shapeStatus().isEmpty(), "shape status");
+        QVERIFY(p->commitShape("小红叶"));
+        waitIdle(*p);
+        QVERIFY(p->view()->removedCount() > 0);
+        w.grab().save("/tmp/claude-0/shots/plt1_review.png");
+        p->setOutputDir(td.filePath("out"));
+        QSignalSpy done(p, &WatermarkPanel::runFinished);
+        p->startRun();
+        QVERIFY(done.wait(60000));
+        waitIdle(*p);
+        w.grab().save("/tmp/claude-0/shots/plt2_run.png");
+        const QStringList cleaned = p->cleanedPltFiles();
+        QCOMPARE(cleaned.size(), 3);
+        for (const QString& c : cleaned) {
+            QVERIFY(c.endsWith("_去水印.plt"));
+            QFile f(c); QVERIFY(f.open(QIODevice::ReadOnly));
+            const QByteArray d = f.readAll();
+            QVERIFY(d.startsWith("IN;SP1;PU0,0;PD0,16000"));
+            const plt::Document doc = plt::parseString(d.toStdString());
+            QCOMPARE((int)doc.lines.size(), 2);              // outline + the extra line; every label is gone
+        }
+        // the originals are untouched
+        QFile o(paths[0]); QVERIFY(o.open(QIODevice::ReadOnly));
+        QCOMPARE((int)plt::parseString(o.readAll().toStdString()).lines.size(), 2 + 8);
+        // Ctrl+Enter -> 批量转换 with the cleaned files
+        QTest::keyClick(p, Qt::Key_Return, Qt::ControlModifier);
+        QTest::qWait(300);
+        QVERIFY(!w.watermarkVisible());
     }
 
     void insideMainWindow() {

@@ -30,8 +30,14 @@
 #include <QtConcurrent>
 #include <algorithm>
 #include <map>
+#include <set>
+
+#include <QShortcut>
+#include <fstream>
+#include <sstream>
 
 #include "DrawView.h"
+#include "pltedit.h"
 
 namespace {
 const char* kKind[] = {"独立叠加对象", "斜铺文字", "页眉页脚/页码", "整页位图", "同层店铺信息栏"};
@@ -61,6 +67,17 @@ QString detectedText(const wm::Report& r) {
     for (auto& f : r.findings) if (f.tier == wm::Tier::Confirm) return QObject::tr("仅有待确认项");
     return QObject::tr("未发现水印");
 }
+std::vector<plt::Stroke> toStrokes(const wm::ShapeTemplate& t) {
+    std::vector<plt::Stroke> v;
+    for (auto& st : t.strokes) { plt::Stroke s; for (auto& q : st) s.push_back({q.first, q.second}); v.push_back(std::move(s)); }
+    return v;
+}
+wm::ShapeTemplate fromStrokes(const std::vector<plt::Stroke>& v, const std::string& name) {
+    wm::ShapeTemplate t; t.name = name;
+    for (auto& st : v) { std::vector<std::pair<double, double>> s; for (auto& q : st) s.emplace_back(q.x, q.y); t.strokes.push_back(std::move(s)); }
+    return t;
+}
+bool isPltPath(const QString& p) { return p.endsWith(".plt", Qt::CaseInsensitive); }
 void clearLayout(QLayout* l) {
     while (QLayoutItem* it = l->takeAt(0)) {
         if (auto* w = it->widget()) w->deleteLater();
@@ -143,6 +160,7 @@ QWidget* WatermarkPanel::buildBottom() {
     connect(next_, &QPushButton::clicked, this, [this] {
         if (step() == 0) goStep(1);
         else if (step() == 1) startRun();
+        else if (const auto l = cleanedPltFiles(); !l.isEmpty()) emit convertRequested(l);
         else openOutput();
     });
     l->addWidget(back_);
@@ -410,11 +428,20 @@ QWidget* WatermarkPanel::buildRunPage() {
     runCancel_ = mkBtn(tr("取消"));
     runCsv_ = mkBtn(tr("导出报告（CSV）…"));
     runOpen_ = mkBtn(tr("打开输出文件夹"));
+    runConvert_ = mkBtn(tr("转 PLT→PDF（Ctrl+Enter）"), true);
+    runConvert_->setEnabled(false);
+    connect(runConvert_, &QPushButton::clicked, this, [this] { const auto l = cleanedPltFiles(); if (!l.isEmpty()) emit convertRequested(l); });
+    auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
+    sc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(sc, &QShortcut::activated, this, [this] { if (!running_ && step() == 2) { const auto l = cleanedPltFiles(); if (!l.isEmpty()) emit convertRequested(l); } });
+    auto* sc2 = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Enter), this);
+    sc2->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(sc2, &QShortcut::activated, sc, &QShortcut::activated);
     connect(runStart_, &QPushButton::clicked, this, [this] { startRun(); });
     connect(runCancel_, &QPushButton::clicked, this, [this] { cancel_ = true; });
     connect(runCsv_, &QPushButton::clicked, this, [this] { exportReport(); });
     connect(runOpen_, &QPushButton::clicked, this, [this] { openOutput(); });
-    br->addWidget(runStart_); br->addWidget(runCancel_); br->addStretch(1); br->addWidget(runCsv_); br->addWidget(runOpen_);
+    br->addWidget(runStart_); br->addWidget(runCancel_); br->addStretch(1); br->addWidget(runCsv_); br->addWidget(runOpen_); br->addWidget(runConvert_);
     v->addLayout(br);
     return page;
 }
@@ -434,11 +461,13 @@ void WatermarkPanel::async(std::function<void()> work, std::function<void()> don
 
 QString WatermarkPanel::letter(int g) const {
     if (g == manual_) return tr("手动");
+    if (g == pltGroup_) return "PLT";
     return QString(QChar('A' + g % 26));
 }
 QColor WatermarkPanel::colorOf(int g) const {
     static const char* c[] = {"#C2410C", "#8A5A00", "#1D4ED8", "#0F766E", "#7C3AED", "#BE185D"};
     if (g == manual_) return QColor("#5B6B6B");
+    if (g == pltGroup_) return QColor("#0F766E");
     return QColor(c[g % 6]);
 }
 bool WatermarkPanel::recipeHasContent(const wm::Recipe& r) const { return r.removeDetected || !r.texts.empty() || !r.shapes.empty(); }
@@ -484,12 +513,12 @@ int WatermarkPanel::addFiles(const QStringList& in) {
     for (const QString& p : in) {
         QFileInfo fi(p);
         if (fi.isDir()) {
-            QDirIterator it(p, {"*.pdf", "*.PDF"}, QDir::Files, QDirIterator::Subdirectories);
+            QDirIterator it(p, {"*.pdf", "*.PDF", "*.plt", "*.PLT"}, QDir::Files, QDirIterator::Subdirectories);
             QStringList sub;
             while (it.hasNext()) sub << it.next();
             sub.sort(Qt::CaseInsensitive);
             found << sub;
-        } else if (fi.suffix().compare("pdf", Qt::CaseInsensitive) == 0 && fi.exists()) found << fi.absoluteFilePath();
+        } else if ((fi.suffix().compare("pdf", Qt::CaseInsensitive) == 0 || fi.suffix().compare("plt", Qt::CaseInsensitive) == 0) && fi.exists()) found << fi.absoluteFilePath();
     }
     QSet<QString> have;
     for (auto& f : files_) have.insert(QFileInfo(f.path).canonicalFilePath());
@@ -500,7 +529,7 @@ int WatermarkPanel::addFiles(const QStringList& in) {
         if (have.contains(canon)) continue;
         if (files_.size() >= wm::kMaxBatchFiles) { ++over; continue; }
         have.insert(canon);
-        WmFile f; f.path = QFileInfo(p).absoluteFilePath(); f.name = QFileInfo(p).fileName();
+        WmFile f; f.path = QFileInfo(p).absoluteFilePath(); f.name = QFileInfo(p).fileName(); f.isPlt = isPltPath(f.path);
         files_.push_back(f);
         ++added;
     }
@@ -510,6 +539,22 @@ int WatermarkPanel::addFiles(const QStringList& in) {
         ++pendingAnalysis_;
         auto rep = std::make_shared<wm::Report>();
         const QString path = files_[i].path;
+        if (files_[i].isPlt) {
+            auto doc = std::make_shared<plt::Document>();
+            auto data = std::make_shared<std::string>();
+            async([rep, path, doc, data] {
+                try {
+                    std::ifstream in(fsPath(path), std::ios::binary);
+                    std::ostringstream ss; ss << in.rdbuf();
+                    *data = ss.str();
+                    *doc = plt::parseString(*data);
+                    rep->ok = true; rep->pageCount = 1;
+                } catch (std::exception& e) { rep->ok = false; rep->error = e.what(); }
+            }, [this, i, rep, doc, data] {
+                if (rep->ok) { files_[i].pltDoc = doc; files_[i].pltData = data; }
+                onAnalyzed(i, *rep);
+            });
+        } else
         async([rep, path] { *rep = wm::analyze(fsPath(path)); }, [this, i, rep] { onAnalyzed(i, *rep); });
     }
     refreshTables();
@@ -530,20 +575,29 @@ void WatermarkPanel::onAnalyzed(int i, const wm::Report& r) {
 
 void WatermarkPanel::regroup() {
     std::vector<wm::Report> reps;
-    for (auto& f : files_) reps.push_back(f.rep);
+    std::vector<int> pdfIdx;
+    bool anyPlt = false;
+    for (int i = 0; i < files_.size(); ++i) {
+        if (files_[i].isPlt) { if (files_[i].rep.ok) anyPlt = true; continue; }
+        reps.push_back(files_[i].rep); pdfIdx.push_back(i);
+    }
     std::vector<std::string> sigs;
     auto g = wm::groupReports(reps, &sigs);
     // remember recipes of groups that still exist
     std::map<std::string, wm::Recipe> oldBySig;
-    for (int k = 0; k < recipes_.size(); ++k) if (k != manual_ && k < int(sigs_.size())) oldBySig[sigs_[k]] = recipes_[k];
-    wm::Recipe oldManual; bool hadManual = manual_ >= 0 && manual_ < recipes_.size();
+    for (int k = 0; k < recipes_.size(); ++k) if (k != manual_ && k != pltGroup_ && k < int(sigs_.size())) oldBySig[sigs_[k]] = recipes_[k];
+    wm::Recipe oldManual, oldPlt;
+    const bool hadManual = manual_ >= 0 && manual_ < recipes_.size();
+    const bool hadPlt = pltGroup_ >= 0 && pltGroup_ < recipes_.size();
     if (hadManual) oldManual = recipes_[manual_];
+    if (hadPlt) oldPlt = recipes_[pltGroup_];
     sigs_ = sigs;
     const int nAuto = int(sigs.size());
     bool anyManual = false;
     for (int x : g) if (x == -1) anyManual = true;
     manual_ = anyManual ? nAuto : -1;
-    nGroups_ = nAuto + (anyManual ? 1 : 0);
+    pltGroup_ = anyPlt ? nAuto + (anyManual ? 1 : 0) : -1;
+    nGroups_ = nAuto + (anyManual ? 1 : 0) + (anyPlt ? 1 : 0);
     recipes_.clear();
     for (int k = 0; k < nAuto; ++k) {
         auto it = oldBySig.find(sigs[k]);
@@ -554,12 +608,22 @@ void WatermarkPanel::regroup() {
         if (hadManual) recipes_.push_back(oldManual);
         else { wm::Recipe r; r.name = s8(tr("手动")); r.removeDetected = false; recipes_.push_back(r); }
     }
+    if (anyPlt) {
+        if (hadPlt) recipes_.push_back(oldPlt);
+        else { wm::Recipe r; r.name = "PLT"; r.removeDetected = false; recipes_.push_back(r); }
+    }
     for (int i = 0; i < files_.size(); ++i) {
         auto& f = files_[i];
         const bool first = f.group == -9;
-        f.group = g[i] == -1 ? manual_ : g[i];
-        if (first) f.selected = g[i] >= 0;
-        f.conformity = f.group >= 0 ? wm::conformity(f.rep, recipes_[f.group]) : 0;
+        int gi;
+        if (f.isPlt) gi = f.rep.ok ? pltGroup_ : -3;
+        else {
+            const int k = int(std::find(pdfIdx.begin(), pdfIdx.end(), i) - pdfIdx.begin());
+            gi = g[k] == -1 ? manual_ : g[k];
+        }
+        f.group = gi;
+        if (first) f.selected = f.isPlt ? f.rep.ok : (gi >= 0 && gi != manual_);
+        f.conformity = gi >= 0 ? (f.isPlt ? 100 : wm::conformity(f.rep, recipes_[gi])) : 0;
         if (f.status == WmFile::Pending && f.group == -2) f.note = tr("图片水印，无法安全去除");
     }
     if (curGroup_ >= nGroups_) curGroup_ = 0;
@@ -592,8 +656,8 @@ void WatermarkPanel::refreshTables() {
         if (f.analyzed && (f.group == -2 || f.group == -3)) chk->setFlags(Qt::ItemIsEnabled);
         table_->setItem(i, 0, chk);
         setTxt(1, f.name);
-        setTxt(2, f.analyzed ? QString::number(f.rep.pageCount) : QString());
-        setTxt(3, f.analyzed ? detectedText(f.rep) : tr("分析中…"));
+        setTxt(2, f.analyzed ? (f.isPlt ? QString("PLT") : QString::number(f.rep.pageCount)) : QString());
+        setTxt(3, !f.analyzed ? tr("分析中…") : f.isPlt ? (f.rep.ok ? tr("PLT 文件（可去除线条字，输出仍为 PLT）") : tr("读取失败")) : detectedText(f.rep));
         QString gt; QColor gc;
         if (!f.analyzed) gt = "—";
         else if (f.group >= 0) { gt = letter(f.group); gc = colorOf(f.group); }
@@ -616,8 +680,8 @@ void WatermarkPanel::refreshGroups() {
         groupsLay_->addWidget(note(tr("添加文件后，系统会按水印的类型自动分组，同组文件共用一套设置。")));
         return;
     }
-    int autoGroups = nGroups_ - (manual_ >= 0 ? 1 : 0);
-    auto* title = new QLabel(autoGroups > 0 ? tr("已自动分成 %1 组").arg(autoGroups) : tr("没有发现可自动去除的水印"));
+    int autoGroups = nGroups_ - (manual_ >= 0 ? 1 : 0) - (pltGroup_ >= 0 ? 1 : 0);
+    auto* title = new QLabel(autoGroups > 0 ? tr("已自动分成 %1 组").arg(autoGroups) : pltGroup_ >= 0 && manual_ < 0 ? tr("PLT 文件") : tr("没有发现可自动去除的水印"));
     title->setStyleSheet("font-weight:700;font-size:15px");
     groupsLay_->addWidget(title);
     groupsLay_->addWidget(note(tr("按水印的类型、位置和样式比对；同组文件共用一套设置。")));
@@ -628,13 +692,13 @@ void WatermarkPanel::refreshGroups() {
         card->setObjectName("card");
         auto* cl = new QVBoxLayout(card);
         cl->setSpacing(4);
-        const bool man = g == manual_;
+        const bool man = g == manual_, isP = g == pltGroup_;
         auto* hd = new QLabel(QString("<span style='background:%1;color:#fff;border-radius:4px;padding:2px 8px;font-weight:700'>%2</span> &nbsp;<b>%3</b>")
-                                  .arg(colorOf(g).name(), letter(g).toHtmlEscaped(), man ? tr("未发现水印（可手动指定文字 / 图形）") : u8(sigs_[g]).toHtmlEscaped()));
+                                  .arg(colorOf(g).name(), letter(g).toHtmlEscaped(), man ? tr("未发现水印（可手动指定文字 / 图形）") : isP ? tr("PLT 文件：去除线条画出的字（如“小红叶”）").toHtmlEscaped() : u8(sigs_[g]).toHtmlEscaped()));
         hd->setTextFormat(Qt::RichText);
         hd->setWordWrap(true);
         cl->addWidget(hd);
-        cl->addWidget(note(man ? tr("%1 个文件 · 共 %2 页 · 默认不处理，勾选后到「审阅与配方」里指定要去除的内容").arg(n).arg(pages)
+        cl->addWidget(note(isP ? tr("%1 个文件 · 在预览上框选一次，自动找出所有相同的字并去除；输出仍是 PLT，可直接进入转 PDF（Ctrl+Enter）").arg(n) : man ? tr("%1 个文件 · 共 %2 页 · 默认不处理，勾选后到「审阅与配方」里指定要去除的内容").arg(n).arg(pages)
                                : tr("%1 个文件 · 共 %2 页 · 平均吻合度 %3").arg(n).arg(pages).arg(n ? confSum / n : 0)));
         groupsLay_->addWidget(card);
     }
@@ -666,11 +730,17 @@ void WatermarkPanel::syncChrome() {
         for (auto& r : recipes_) if (recipeHasContent(r)) ++active;
         info_->setText(tr("%1 组中有 %2 组已设置去除内容 · 输出到 %3").arg(nGroups_).arg(active).arg(outDir_));
     } else {
-        next_->setText(tr("打开输出文件夹"));
+        const int nc = cleanedPltFiles().size();
+        next_->setText(nc ? tr("转 PLT→PDF（%1 个）· Ctrl+Enter").arg(nc) : tr("打开输出文件夹"));
         next_->setEnabled(!running_ && !outDir_.isEmpty());
         info_->setText(summaryText());
     }
-    if (outLbl_) outLbl_->setText(tr("输出到：%1\n文件名：{原名}_去水印.pdf，不覆盖原件").arg(outDir_));
+    if (outLbl_) {
+        bool anyPlt = false, anyPdf = false;
+        for (auto& f : files_) if (f.group >= 0) (f.isPlt ? anyPlt : anyPdf) = true;
+        const QString ext = anyPlt && anyPdf ? "{原名}_去水印.pdf / .plt" : (anyPlt ? "{原名}_去水印.plt" : "{原名}_去水印.pdf");
+        outLbl_->setText(tr("输出到：%1\n文件名：%2，不覆盖原件").arg(outDir_, ext));
+    }
     if (trial_) trial_->setEnabled(!running_ && sel > 0);
 }
 
@@ -727,6 +797,7 @@ void WatermarkPanel::refreshReview() {
         int n = 0; for (auto& f : files_) if (f.group == g) ++n;
         auto* b = new QPushButton(tr("%1 组 · %2 个文件").arg(letter(g)).arg(n));
         if (g == manual_) b->setText(tr("手动 · %1 个文件").arg(n));
+        if (g == pltGroup_) b->setText(tr("PLT · %1 个文件").arg(n));
         b->setCheckable(true);
         b->setChecked(g == curGroup_);
         b->setProperty("seg", true);
@@ -758,12 +829,17 @@ void WatermarkPanel::refreshRecipePanel() {
     auto& rc = recipes_[curGroup_];
     autoChk_->blockSignals(true);
     autoChk_->setChecked(rc.removeDetected);
-    autoChk_->setEnabled(curGroup_ != manual_);
+    autoChk_->setEnabled(curGroup_ != manual_ && curGroup_ != pltGroup_);
     autoChk_->blockSignals(false);
+    const bool plt = curGroup_ == pltGroup_;
+    tabs_->setTabEnabled(0, !plt);
+    tabs_->setTabEnabled(1, !plt);
+    if (plt && tabs_->currentIndex() != 2) tabs_->setCurrentIndex(2);
     findings_->setProperty("busy", true);
     findings_->clear();
+    if (curGroup_ == pltGroup_) findings_->addItem(tr("PLT 文件没有自动检测，请用「框选图形」圈住要去除的字"));
     int groupSize = 0; for (auto& f : files_) if (f.group == curGroup_) ++groupSize;
-    if (sample_ >= 0) {
+    if (sample_ >= 0 && !files_[sample_].isPlt) {
         const auto ex = extraFor(sample_);
         const auto& rep = files_[sample_].rep;
         for (int i = 0; i < int(rep.findings.size()); ++i) {
@@ -785,12 +861,12 @@ void WatermarkPanel::refreshRecipePanel() {
     needleList_->clear();
     for (auto& t : rc.texts) needleList_->addItem(u8(t));
     shapeList_->clear();
-    for (auto& s : rc.shapes) shapeList_->addItem(tr("%1（%2 条线）").arg(u8(s.name)).arg(s.strokes.size()));
+    for (auto& sh : rc.shapes) shapeList_->addItem(tr("%1（%2 条线）").arg(u8(sh.name)).arg(sh.strokes.size()));
     shapeLbl_->setText(haveShape_ ? shapeStatus_ : (shapeStatus_.isEmpty() ? tr("尚未框选") : shapeStatus_));
     shapeAdd_->setEnabled(haveShape_);
     // text found in the sample (decoded)
     docTexts_->clear();
-    if (sample_ >= 0) {
+    if (sample_ >= 0 && !files_[sample_].isPlt) {
         const QString path = files_[sample_].path;
         const int sm = sample_;
         auto fill = [this](const std::vector<wm::TextItem>& items) {
@@ -832,6 +908,39 @@ void WatermarkPanel::removeNeedle(int i) {
     refreshRecipePanel(); refreshPreview(); refreshTables(); syncChrome();
 }
 
+std::shared_ptr<wm::PageDrawing> WatermarkPanel::pltDrawing(const WmFile& f, const std::vector<size_t>& skip, QPointF* origin) const {
+    auto d = std::make_shared<wm::PageDrawing>();
+    if (!f.pltDoc) return d;
+    const auto& doc = *f.pltDoc;
+    const double pad = pltPad_;
+    d->ok = true; d->pageCount = 1;
+    d->w = doc.bounds.w() + 2 * pad; d->h = doc.bounds.h() + 2 * pad;
+    std::set<size_t> sk(skip.begin(), skip.end());
+    const double ox = doc.bounds.minX - pad, oy = doc.bounds.maxY + pad;
+    if (origin) *origin = QPointF(ox, oy);
+    d->items.reserve(doc.lines.size());
+    for (size_t i = 0; i < doc.lines.size(); ++i) {
+        if (sk.count(i)) continue;
+        wm::DrawItem it; it.kind = wm::DrawItem::Stroke; it.lineWidth = 0.25;
+        it.pts.reserve(doc.lines[i].pts.size());
+        for (auto& p : doc.lines[i].pts) it.pts.emplace_back(p.x - ox, oy - p.y);
+        d->items.push_back(std::move(it));
+    }
+    return d;
+}
+
+std::vector<size_t> WatermarkPanel::pltRemovalLines(const WmFile& f, const wm::Recipe& rc) const {
+    std::set<size_t> all;
+    if (f.pltDoc) for (auto& t : rc.shapes) { auto r = plt::findTemplateCopies(*f.pltDoc, toStrokes(t)); if (r.ok) all.insert(r.lines.begin(), r.lines.end()); }
+    return {all.begin(), all.end()};
+}
+
+QStringList WatermarkPanel::cleanedPltFiles() const {
+    QStringList r;
+    for (auto& f : files_) if (f.isPlt && (f.status == WmFile::Done || f.status == WmFile::NeedsCheck) && !f.outPath.isEmpty()) r << f.outPath;
+    return r;
+}
+
 void WatermarkPanel::refreshPreview() {
     if (!view_) return;
     if (sample_ < 0 || sample_ >= files_.size() || !files_[sample_].analyzed || !files_[sample_].rep.ok) {
@@ -839,6 +948,27 @@ void WatermarkPanel::refreshPreview() {
         return;
     }
     const auto& f = files_[sample_];
+    if (f.isPlt) {   // one drawing: before / after are both built in memory
+        page_ = 1;
+        pageLbl_->setText(tr("PLT 图形（单页）"));
+        prevPage_->setEnabled(false); nextPage_->setEnabled(false);
+        const quint64 gen = ++previewGen_;
+        const wm::Recipe rc = recipes_[curGroup_];
+        auto res = std::make_shared<std::pair<std::shared_ptr<wm::PageDrawing>, std::shared_ptr<wm::PageDrawing>>>();
+        auto org = std::make_shared<QPointF>();
+        const WmFile fcopy = f;
+        async([=] {
+            res->first = pltDrawing(fcopy, {}, org.get());
+            auto lines = pltRemovalLines(fcopy, rc);
+            res->second = lines.empty() ? res->first : pltDrawing(fcopy, lines, nullptr);
+        }, [=] {
+            if (gen != previewGen_) return;
+            pltOrigin_ = *org;
+            view_->setDrawings(res->first, res->second);
+            removedLbl_->setText(view_->removedCount() ? tr("将去除 %1 条线").arg(view_->removedCount()) : tr("还没有要去除的内容：在预览上框选要去除的字"));
+        });
+        return;
+    }
     page_ = std::max(1, std::min(f.rep.pageCount, page_));
     pageLbl_->setText(tr("第 %1 / %2 页").arg(page_).arg(f.rep.pageCount));
     prevPage_->setEnabled(page_ > 1);
@@ -879,6 +1009,33 @@ void WatermarkPanel::boxShape(double x0, double y0, double x1, double y1) {
     shapeLbl_->setText(shapeStatus_);
     shapeAdd_->setEnabled(false);
     view_->setBox(QRectF(QPointF(std::min(x0, x1), std::min(y0, y1)), QPointF(std::max(x0, x1), std::max(y0, y1))));
+    if (files_[sample_].isPlt) {
+        const auto& f = files_[sample_];
+        plt::Bounds b;
+        const double ax = std::min(x0, x1) + pltOrigin_.x(), bx = std::max(x0, x1) + pltOrigin_.x();
+        const double ay = pltOrigin_.y() - std::max(y0, y1), by = pltOrigin_.y() - std::min(y0, y1);
+        b.add({ax, ay}); b.add({bx, by});
+        auto doc = f.pltDoc;
+        struct PR { std::vector<plt::Stroke> t; plt::ShapeEdit e; bool ok = false; std::string err; };
+        auto pr = std::make_shared<PR>();
+        const int sm0 = sample_;
+        async([=] {
+            pr->ok = plt::extractTemplate(*doc, b, pr->t, &pr->err);
+            if (pr->ok) pr->e = plt::findTemplateCopies(*doc, pr->t);
+        }, [=] {
+            if (sm0 != sample_) return;
+            if (!pr->ok) { shapeStatus_ = u8(pr->err); haveShape_ = false; }
+            else if (!pr->e.ok) { shapeStatus_ = tr("框选了 %1 条线，但没有找到可去除的相同图形").arg(pr->t.size()); haveShape_ = false; }
+            else {
+                shape_ = fromStrokes(pr->t, "");
+                haveShape_ = true; shapeCopies_ = pr->e.copies;
+                shapeStatus_ = tr("框选 %1 条线 · 共找到 %2 处相同（共 %3 条线）").arg(pr->t.size()).arg(pr->e.copies).arg(pr->e.lines.size());
+            }
+            shapeLbl_->setText(shapeStatus_);
+            shapeAdd_->setEnabled(haveShape_);
+        });
+        return;
+    }
     struct R { wm::ShapeTemplate t; wm::ShapeResult sel, all; };
     auto r = std::make_shared<R>();
     const QString path = files_[sample_].path;
@@ -917,7 +1074,7 @@ bool WatermarkPanel::commitShape(const QString& name) {
 
 void WatermarkPanel::startRun(int maxFiles) {
     if (running_ || files_.isEmpty() || pendingAnalysis_ > 0) return;
-    struct Job { int i; QString in, out; wm::Recipe rc; std::vector<int> also; };
+    struct Job { int i; QString in, out; wm::Recipe rc; std::vector<int> also; bool plt = false; std::shared_ptr<plt::Document> doc; std::shared_ptr<std::string> data; };
     auto jobs = std::make_shared<std::vector<Job>>();
     QSet<QString> used;
     QDir().mkpath(outDir_);
@@ -934,8 +1091,10 @@ void WatermarkPanel::startRun(int maxFiles) {
         if (!recipeHasContent(recipes_[f.group]) && also.empty()) { f.status = WmFile::Skipped; f.note = tr("配方里没有要去除的内容"); continue; }
         if (maxFiles > 0) ++taken;
         Job j; j.i = i; j.in = f.path; j.rc = recipes_[f.group]; j.also = also;
-        QString out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印.pdf");
-        for (int k = 2; QFile::exists(out) || used.contains(out); ++k) out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印(%1).pdf").arg(k);
+        j.plt = f.isPlt; j.doc = f.pltDoc; j.data = f.pltData;
+        const QString ext = f.isPlt ? ".plt" : ".pdf";
+        QString out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印") + ext;
+        for (int k = 2; QFile::exists(out) || used.contains(out); ++k) out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印(%1)").arg(k) + ext;
         used.insert(out);
         j.out = out;
         f.status = WmFile::Waiting;
@@ -954,11 +1113,35 @@ void WatermarkPanel::startRun(int maxFiles) {
                 continue;
             }
             QMetaObject::invokeMethod(self.data(), [self, i = j.i] { if (self) { self->files_[i].status = WmFile::Running; self->refreshRun(); } }, Qt::QueuedConnection);
-            auto r = wm::applyRecipe(fsPath(j.in), fsPath(j.out), j.rc, j.also);
-            QMetaObject::invokeMethod(self.data(), [self, i = j.i, r] {
+            wm::FileResult r;
+            if (j.plt) {
+                // PLT: switch off every stroke that matches a template; the rest of the file stays as it was
+                std::set<size_t> lines;
+                for (auto& t : j.rc.shapes) { auto e = plt::findTemplateCopies(*j.doc, toStrokes(t)); if (e.ok) lines.insert(e.lines.begin(), e.lines.end()); }
+                r.strokesBefore = (long)j.doc->lines.size();
+                if (lines.empty()) { r.nothingToDo = true; r.error = "没有找到可去除的内容"; }
+                else {
+                    const std::string out = plt::removeLines(*j.data, *j.doc, std::vector<size_t>(lines.begin(), lines.end()));
+                    try {
+                        const plt::Document chk = plt::parseString(out);
+                        r.strokesAfter = (long)chk.lines.size();
+                    } catch (...) { r.strokesAfter = -1; }
+                    r.shapesRemoved = (int)lines.size();
+                    r.strokesExpected = r.strokesBefore - (long)lines.size();
+                    r.verified = r.strokesAfter == r.strokesExpected;
+                    if (!r.verified) r.error = "校验未通过：线条数量与预期不符，未输出";
+                    else {
+                        std::ofstream o(fsPath(j.out), std::ios::binary);
+                        o.write(out.data(), (std::streamsize)out.size());
+                        if (o) r.ok = true; else r.error = "无法写入输出文件";
+                    }
+                }
+            } else r = wm::applyRecipe(fsPath(j.in), fsPath(j.out), j.rc, j.also);
+            QMetaObject::invokeMethod(self.data(), [self, i = j.i, r, outp = j.out] {
                 if (!self) return;
                 auto& f = self->files_[i];
                 f.res = r;
+                f.outPath = r.ok ? outp : QString();
                 if (r.ok) { f.status = f.conformity < 85 && f.group != self->manual_ ? WmFile::NeedsCheck : WmFile::Done; f.note = f.status == WmFile::NeedsCheck ? tr("与配方不完全一致，建议抽检") : QString(); }
                 else if (r.nothingToDo) { f.status = WmFile::Skipped; f.note = tr("没有找到配方要去除的内容"); }
                 else { f.status = WmFile::Failed; f.note = u8(r.error); }
@@ -1024,6 +1207,12 @@ void WatermarkPanel::refreshRun() {
     runCancel_->setEnabled(running_);
     runCsv_->setEnabled(!running_ && total > 0);
     runOpen_->setEnabled(!outDir_.isEmpty());
+    {
+        const int n = cleanedPltFiles().size();
+        runConvert_->setVisible(n > 0);
+        runConvert_->setEnabled(!running_ && n > 0);
+        runConvert_->setText(tr("转 PLT→PDF（%1 个）· Ctrl+Enter").arg(n));
+    }
     syncChrome();
 }
 

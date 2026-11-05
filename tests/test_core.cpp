@@ -9,6 +9,7 @@
 #include "../core/docops.h"
 #include "../core/layout.h"
 #include "../core/pagerange.h"
+#include "../core/pltedit.h"
 #include "../core/pdf_min.h"
 #include "../core/naming.h"
 #include "../core/plt.h"
@@ -265,6 +266,64 @@ int main(int argc, char** argv) {
             CHECK(!hasNumber, "overview page has no page number");
             CHECK(pl.pages[1].label == "1-1" || pl.pages[1].row == 0, "first grid page after overview");
         }
+    }
+    // PLT stroke-label removal: a label drawn with line strokes ("小红叶" style), copies of different size / mirrored / turned
+    {
+        auto fmt = [](double mm) { return std::to_string((long)std::lround(mm * 40)); };
+        struct Pt2 { double x, y; };
+        const std::vector<std::vector<Pt2>> glyph = {{{0, 0}, {10, 0}, {10, 6}}, {{0, 8}, {4, 12}, {9, 9}, {12, 14}}, {{14, 0}, {14, 14}}, {{18, 2}, {22, 2}}};
+        auto draw = [&](double ox, double oy, double sc, bool mir, int rot, bool relative) {
+            std::string o;
+            for (auto& st : glyph) {
+                std::vector<Pt2> q;
+                for (auto p : st) { double x = (mir ? -p.x : p.x) * sc, y = p.y * sc; for (int k = 0; k < rot; ++k) { double nx = -y, ny = x; x = nx; y = ny; } q.push_back({x + ox, y + oy}); }
+                o += "PU" + fmt(q[0].x) + "," + fmt(q[0].y) + ";";
+                if (relative) {
+                    o += "PR;PD";
+                    for (size_t k = 1; k < q.size(); ++k) o += (k > 1 ? "," : "") + std::to_string(std::lround((q[k].x - q[k - 1].x) * 40)) + "," + std::to_string(std::lround((q[k].y - q[k - 1].y) * 40));
+                    o += ";PU;PA;";
+                } else {
+                    o += "PD";
+                    for (size_t k = 1; k < q.size(); ++k) o += (k > 1 ? "," : "") + fmt(q[k].x) + "," + fmt(q[k].y);
+                    o += ";";
+                }
+            }
+            return o;
+        };
+        std::string data = "IN;SP1;PU0,0;PD0,16000,16000,16000,16000,0,0,0;PU;PU1000,1000;PD1000,3000;";   // a pattern outline + a line
+        data += draw(100, 100, 1.0, false, 0, false);
+        data += draw(300, 120, 1.5, false, 0, true);       // bigger, drawn with relative moves
+        data += draw(200, 300, 1.0, true, 0, false);       // mirrored
+        data += draw(400, 400, 1.0, false, 2, false);      // turned by 180
+        data += "PU2000,2000;PD2500,2500;PU;";               // something after the labels
+        plt::Document d = plt::parseString(data);
+        const size_t nGlyph = glyph.size(), nOther = 3;
+        CHECK(d.lines.size() == nOther + 4 * nGlyph, "plt label: parsed " << d.lines.size());
+        plt::Bounds box; box.add({99, 99}); box.add({125, 118});
+        auto r = plt::findShapeCopies(d, box, true);
+        CHECK(r.ok && r.selected == (int)nGlyph && r.copies == 3 && r.lines.size() == 4 * nGlyph, "plt label: found 4 instances");
+        std::string out = plt::removeLines(data, d, r.lines);
+        plt::Document d2 = plt::parseString(out);
+        CHECK(d2.lines.size() == nOther, "plt label: only the outline and the other lines remain (" << d2.lines.size() << ")");
+        std::set<size_t> gone(r.lines.begin(), r.lines.end());
+        std::vector<size_t> kept; for (size_t i = 0; i < d.lines.size(); ++i) if (!gone.count(i)) kept.push_back(i);
+        bool same = d2.lines.size() == kept.size();
+        for (size_t i = 0; same && i < d2.lines.size(); ++i) { auto& a = d2.lines[i].pts; auto& b = d.lines[kept[i]].pts; same = a.size() == b.size(); for (size_t k = 0; same && k < a.size(); ++k) same = std::fabs(a[k].x - b[k].x) < 1e-9 && std::fabs(a[k].y - b[k].y) < 1e-9; }
+        CHECK(same, "plt label: remaining lines unchanged (also after relative moves)");
+        CHECK(out.find("IN;SP1;PU0,0;PD0,16000") == 0, "plt label: file header untouched");
+        auto only = plt::findShapeCopies(d, box, false);
+        CHECK(only.ok && only.lines.size() == nGlyph && only.copies == 0, "plt label: boxed instance only");
+        plt::Bounds none; none.add({0, 0}); none.add({1, 1});
+        CHECK(!plt::findShapeCopies(d, none, true).ok, "plt label: empty box -> error");
+        // template taken once, reused on another drawing
+        std::vector<plt::Stroke> tpl; CHECK(plt::extractTemplate(d, box, tpl), "plt label: template");
+        plt::Document other = plt::parseString("IN;PU0,0;PD400,0;PU;" + draw(50, 60, 0.8, false, 1, false));
+        auto tr = plt::findTemplateCopies(other, tpl);
+        CHECK(tr.ok && tr.lines.size() == nGlyph, "plt label: template applied to another file (scaled, turned)");
+        // arcs are not editable (cannot be switched off without moving the pen)
+        plt::Document arcs = plt::parseString("IN;PU0,0;PD400,0;AA400,400,90;PU;");
+        bool anyNon = false; for (auto& l : arcs.lines) if (!l.editable) anyNon = true;
+        CHECK(anyNon, "plt label: arc lines are marked not editable");
     }
     std::cout << (fails ? "FAILED: " : "ALL PASSED") << (fails ? std::to_string(fails) : "") << "\n";
     return fails ? 1 : 0;

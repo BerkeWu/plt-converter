@@ -24,9 +24,14 @@ struct Bounds {
 
 struct Rgb { double r = 0, g = 0, b = 0; };  // 0..1
 
+// Where a polyline came from in the file text (used to edit the PLT without regenerating it).
+struct Span { size_t a = 0, b = 0; char kind = 'D'; };   // [a,b) = one command incl. its ';'.  kind: 'D' PD, 'A' PA, 'R' PR, 'X' CI/EA/ER (self-contained)
+
 struct Polyline {
     int pen = 1;
     std::vector<Pt> pts;  // >= 2 points
+    std::vector<Span> src;   // commands that drew it
+    bool editable = true;    // false when an arc command contributed (cannot be dropped without moving the pen)
 };
 
 struct Document {

@@ -7,7 +7,7 @@ if(MSVC)
 endif()
 
 # Qt-independent core (parser, tiling, naming, dev PDF writer)
-add_library(pltcore core/plt.cpp core/layout.cpp core/pdf_min.cpp core/docops.cpp)
+add_library(pltcore core/plt.cpp core/pltedit.cpp core/layout.cpp core/pdf_min.cpp core/docops.cpp)
 target_include_directories(pltcore PUBLIC core)
 
 add_executable(plt2pdf tools/plt2pdf.cpp)
