@@ -6,6 +6,8 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QTest>
+#include <QWheelEvent>
+#include <cmath>
 
 #include "DrawView.h"
 #include "MainWindow.h"
@@ -107,7 +109,7 @@ private slots:
         for (int i : {0, 1, 2, 5}) {
             QVERIFY(p.files()[i].res.verified);
             QVERIFY(p.files()[i].res.removedTotal() > 0);
-            QVERIFY(QFileInfo::exists(out + "/" + QFileInfo(names[i]).completeBaseName() + QString::fromUtf8("_去水印.pdf")));
+            QVERIFY(QFileInfo::exists(out + "/" + QFileInfo(names[i]).completeBaseName() + QString::fromUtf8("_haoyang.pdf")));
         }
         QVERIFY(p.files()[2].res.textsRemoved > 0);
         QVERIFY(QFileInfo::exists(out + QString::fromUtf8("/去水印报告.csv")));
@@ -117,7 +119,7 @@ private slots:
         QSignalSpy done2(&p, &WatermarkPanel::runFinished);
         p.startRun();
         QVERIFY(done2.wait(120000));
-        QVERIFY(QFileInfo::exists(out + QString::fromUtf8("/C_flat_去水印(2).pdf")));
+        QVERIFY(QFileInfo::exists(out + QString::fromUtf8("/C_flat_haoyang(2).pdf")));
     }
 
     void styledShots() {   // screenshots of the three steps inside the main window (with the application style)
@@ -204,7 +206,7 @@ private slots:
         const QStringList cleaned = p->cleanedPltFiles();
         QCOMPARE(cleaned.size(), 3);
         for (const QString& c : cleaned) {
-            QVERIFY(c.endsWith("_去水印.plt"));
+            QVERIFY(c.endsWith("_haoyang.plt"));
             QFile f(c); QVERIFY(f.open(QIODevice::ReadOnly));
             const QByteArray d = f.readAll();
             QVERIFY(d.startsWith("IN;SP1;PU0,0;PD0,16000"));
@@ -218,6 +220,64 @@ private slots:
         QTest::keyClick(p, Qt::Key_Return, Qt::ControlModifier);
         QTest::qWait(300);
         QVERIFY(!w.watermarkVisible());
+    }
+
+    void clearQueueAndZoom() {
+        QTemporaryDir td;
+        QVERIFY(QFile::copy(data_ + "/C_flat.pdf", td.filePath("a.pdf")));
+        QVERIFY(QFile::copy(data_ + "/B_block.pdf", td.filePath("b.pdf")));
+        WatermarkPanel p;
+        p.setSilent(true);
+        p.resize(1360, 820);
+        p.show();
+        QCOMPARE(p.addFiles({td.filePath("a.pdf"), td.filePath("b.pdf")}), 2);
+        waitIdle(p);
+        QCOMPARE(p.groupCount(), 2);
+        p.goStep(1); p.selectGroup(0); waitIdle(p);
+        // zoom: wheel around the cursor keeps the page point under the cursor; box dragging still maps to page points
+        auto* v = p.view();
+        QCOMPARE(v->zoom(), 1.0);
+        const QPointF anchorPage(200, 300);
+        const QPointF before = v->pageToWidget(anchorPage);
+        QWheelEvent we(before, v->mapToGlobal(before), QPoint(), QPoint(0, 240), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(v, &we);
+        QVERIFY(v->zoom() > 1.3);
+        const QPointF after = v->pageToWidget(anchorPage);
+        QVERIFY(std::abs(after.x() - before.x()) < 0.5 && std::abs(after.y() - before.y()) < 0.5);
+        v->zoomIn(); v->zoomIn();
+        const double z = v->zoom();
+        QVERIFY(z > 2.0);
+        // refreshing the preview (e.g. after adding a text) must not reset the zoom
+        p.addNeedle("zzz-not-there"); waitIdle(p);
+        QCOMPARE(v->zoom(), z);
+        // pan with the right button
+        const QPointF a0 = v->pageToWidget({100, 100});
+        QTest::mousePress(v, Qt::RightButton, Qt::NoModifier, QPoint(300, 300));
+        QTest::mouseMove(v, QPoint(340, 330));
+        QTest::mouseRelease(v, Qt::RightButton, Qt::NoModifier, QPoint(340, 330));
+        const QPointF a1 = v->pageToWidget({100, 100});
+        QVERIFY(std::abs((a1.x() - a0.x()) - 40) < 1 && std::abs((a1.y() - a0.y()) - 30) < 1);
+        p.grab().save("/tmp/claude-0/shots/zoom1.png");
+        v->setSelectEnabled(true);
+        QSignalSpy boxed(v, &DrawView::boxed);
+        const QPointF p0 = v->pageToWidget({120, 140}), p1 = v->pageToWidget({150, 180});
+        QTest::mousePress(v, Qt::LeftButton, Qt::NoModifier, p0.toPoint());
+        QTest::mouseMove(v, p1.toPoint());
+        QTest::mouseRelease(v, Qt::LeftButton, Qt::NoModifier, p1.toPoint());
+        QCOMPARE(boxed.size(), 1);
+        QVERIFY(std::abs(boxed[0][0].toDouble() - 120) < 1.5 && std::abs(boxed[0][3].toDouble() - 180) < 1.5);
+        v->zoomFit();
+        QCOMPARE(v->zoom(), 1.0);
+        // clear the queue
+        QVERIFY(p.clearQueue());
+        QCOMPARE(p.files().size(), 0);
+        QCOMPARE(p.groupCount(), 0);
+        QCOMPARE(p.step(), 0);
+        QVERIFY(p.outputDir().isEmpty());
+        // and start again
+        QCOMPARE(p.addFiles({td.filePath("a.pdf")}), 1);
+        waitIdle(p);
+        QCOMPARE(p.groupCount(), 1);
     }
 
     void insideMainWindow() {

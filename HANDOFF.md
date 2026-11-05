@@ -188,3 +188,7 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - `WatermarkPanel`：`.plt` 进入「PLT」组；预览用 plt::Document 在内存里画前/后（单位 mm，四周留 10 mm）；框选坐标换算回 mm；运行时每个文件按配方里的图形模板找线 → `removeLines` → 重新解析校验线条数 = 原有 − 去除数 → 写 `原名_去水印.plt`。第三步出现「转 PLT→PDF（n 个）· Ctrl+Enter」，发出 `convertRequested`，MainWindow 接上：1 个文件→`loadFile`（单文件模式），多个→批量转换 `addBatchFiles`。
 - 测试：test_core（PLT 块：相对移动、镜像/放大/旋转 180、弧不可编辑、模板复用）、test_wmgui `pltLabelFlow`（3 个 PLT、含 1.5 倍副本、框选→运行→输出可解析→原件不变→Ctrl+Enter 离开水印页）。
 - 未验证：真实 CAD 导出的带「小红叶」PLT（字符可能用圆弧/曲线或点很多的笔画，需要样本）；Windows 实机；Ctrl+Enter 在批量页是否与既有快捷键冲突（未发现）。
+
+
+## 第十五轮：清除队列 / 预览缩放 / 输出后缀 haoyang
+- `WatermarkPanel::clearQueue()` + 底栏按钮（有配方时二次确认，`setSilent(true)` 跳过确认）；运行中/分析中拒绝。`DrawView` 增加 zoom_/pan_（fitRect 基准 × zoom，滚轮锚点缩放），`pageToWidget` 供测试。输出名后缀常量在 `WatermarkPanel::startRun` 与 `tools/pdfwm.cpp`；CSV 报告名、输出文件夹名「去水印输出」未改。测试 `clearQueueAndZoom`。

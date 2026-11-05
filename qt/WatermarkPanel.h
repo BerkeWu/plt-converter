@@ -77,6 +77,7 @@ public:
     // run
     void startRun(int maxFiles = 0);                         // maxFiles > 0: only the first N files of the current group (试跑)
     void cancelRun() { cancel_ = true; }
+    bool clearQueue();                                      // remove all files, recipes and results; back to step 1 (refused while busy)
     bool running() const { return running_; }
     bool writeReport(const QString& csvPath) const;
     QString summaryText() const;
@@ -124,7 +125,7 @@ private:
     // ui
     QStackedWidget* pages_ = nullptr;
     QPushButton* stepBtn_[3] = {};
-    QPushButton *back_ = nullptr, *next_ = nullptr;
+    QPushButton *back_ = nullptr, *next_ = nullptr, *clear_ = nullptr;
     QLabel* info_ = nullptr;
     QTableWidget* table_ = nullptr;
     QLabel *limitNote_ = nullptr;

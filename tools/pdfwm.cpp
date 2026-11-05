@@ -21,7 +21,7 @@ int main(int argc, char** argv) {
                              "                                                框选线条画出的字（单位 pt，原点在页面左上角），并去除所有页上相同的副本\n"
                              "      pdfwm group 文件1.pdf 文件2.pdf ...         按水印特征自动分组（最多 20 个）\n"
                              "      pdfwm make-recipe 样本.pdf -o 配方.wmrecipe [--name 名称] [--text a,b] [--shape 页:x0,y0,x1,y1[:名称]]\n"
-                             "      pdfwm batch --recipe 配方.wmrecipe --out 输出目录 文件1.pdf 文件2.pdf ...   批量套用配方，输出 *_去水印.pdf 与 报告.csv\n");
+                             "      pdfwm batch --recipe 配方.wmrecipe --out 输出目录 文件1.pdf 文件2.pdf ...   批量套用配方，输出 *_haoyang.pdf 与 报告.csv\n");
         return 2;
     }
     std::string cmd = argv[1];
@@ -163,8 +163,8 @@ static int batchMain(const std::string& cmd, int argc, char** argv) {
             ++skip; csv << csvQ(name) << ",跳过," << conf << ",0,,," << (grp[i] == -2 ? "图片水印" : grp[i] == -3 ? "读取失败" : "未发现水印") << "\n";
             std::printf("跳过  %s\n", name.c_str()); continue;
         }
-        fs::path out = outDir / (files[i].stem().string() + "_去水印.pdf");
-        for (int k = 2; fs::exists(out); ++k) out = outDir / (files[i].stem().string() + "_去水印(" + std::to_string(k) + ").pdf");
+        fs::path out = outDir / (files[i].stem().string() + "_haoyang.pdf");
+        for (int k = 2; fs::exists(out); ++k) out = outDir / (files[i].stem().string() + "_haoyang(" + std::to_string(k) + ").pdf");
         auto r = wm::applyRecipe(files[i], out, rc);
         if (r.ok) {
             ++ok;

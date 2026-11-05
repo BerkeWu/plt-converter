@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QProgressBar>
 #include <QPushButton>
@@ -152,6 +153,20 @@ QWidget* WatermarkPanel::buildBottom() {
     bar->setFixedHeight(60);
     auto* l = new QHBoxLayout(bar);
     l->setContentsMargins(24, 0, 24, 0);
+    clear_ = mkBtn(tr("清除队列"));
+    clear_->setToolTip(tr("移除所有文件和已设置的配方，重新开始（不会删除磁盘上的任何文件）"));
+    connect(clear_, &QPushButton::clicked, this, [this] {
+        if (running_ || pendingAnalysis_ > 0) return;
+        bool hasRecipe = false;
+        for (auto& r : recipes_) if (recipeHasContent(r)) hasRecipe = true;
+        if (!silent_) {
+            const QString msg = hasRecipe ? tr("清除队列中的 %1 个文件？\n已设置的配方也会一并清除。磁盘上的文件不受影响。").arg(files_.size())
+                                          : tr("清除队列中的 %1 个文件？磁盘上的文件不受影响。").arg(files_.size());
+            if (QMessageBox::question(this, tr("清除队列"), msg, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        }
+        clearQueue();
+    });
+    l->addWidget(clear_);
     info_ = new QLabel;
     l->addWidget(info_, 1);
     back_ = mkBtn(tr("← 上一步"));
@@ -508,6 +523,25 @@ void WatermarkPanel::dropEvent(QDropEvent* e) {
     if (!p.isEmpty()) { goStep(0); addFiles(p); }
 }
 
+bool WatermarkPanel::clearQueue() {
+    if (running_ || pendingAnalysis_ > 0) return false;
+    ++previewGen_;
+    files_.clear(); recipes_.clear(); sigs_.clear(); extra_.clear();
+    beforeCache_.clear(); textCache_.clear();
+    nGroups_ = 0; manual_ = -1; pltGroup_ = -1; curGroup_ = 0; sample_ = -1; page_ = 1;
+    haveShape_ = false; shapeStatus_.clear(); shapeCopies_ = 0; shape_ = {};
+    outDir_.clear();
+    cancel_ = false;
+    limitNote_->setText(QString());
+    view_->setBox({});
+    view_->clear();
+    pages_->setCurrentIndex(0);
+    refreshTables(); refreshGroups(); refreshRun();
+    syncChrome();
+    emit filesAnalyzed();
+    return true;
+}
+
 int WatermarkPanel::addFiles(const QStringList& in) {
     QStringList found;
     for (const QString& p : in) {
@@ -717,6 +751,7 @@ void WatermarkPanel::syncChrome() {
     }
     int sel = 0, usable = 0;
     for (auto& f : files_) { if (f.selected && f.group >= 0) ++sel; if (f.group >= 0) ++usable; }
+    if (clear_) { clear_->setEnabled(!files_.isEmpty() && !running_ && pendingAnalysis_ == 0); }
     back_->setEnabled(s > 0);
     back_->setVisible(s < 2);
     if (s == 0) {
@@ -738,7 +773,7 @@ void WatermarkPanel::syncChrome() {
     if (outLbl_) {
         bool anyPlt = false, anyPdf = false;
         for (auto& f : files_) if (f.group >= 0) (f.isPlt ? anyPlt : anyPdf) = true;
-        const QString ext = anyPlt && anyPdf ? "{原名}_去水印.pdf / .plt" : (anyPlt ? "{原名}_去水印.plt" : "{原名}_去水印.pdf");
+        const QString ext = anyPlt && anyPdf ? "{原名}_haoyang.pdf / .plt" : (anyPlt ? "{原名}_haoyang.plt" : "{原名}_haoyang.pdf");
         outLbl_->setText(tr("输出到：%1\n文件名：%2，不覆盖原件").arg(outDir_, ext));
     }
     if (trial_) trial_->setEnabled(!running_ && sel > 0);
@@ -1093,8 +1128,8 @@ void WatermarkPanel::startRun(int maxFiles) {
         Job j; j.i = i; j.in = f.path; j.rc = recipes_[f.group]; j.also = also;
         j.plt = f.isPlt; j.doc = f.pltDoc; j.data = f.pltData;
         const QString ext = f.isPlt ? ".plt" : ".pdf";
-        QString out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印") + ext;
-        for (int k = 2; QFile::exists(out) || used.contains(out); ++k) out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_去水印(%1)").arg(k) + ext;
+        QString out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_haoyang") + ext;
+        for (int k = 2; QFile::exists(out) || used.contains(out); ++k) out = outDir_ + "/" + QFileInfo(f.path).completeBaseName() + QString::fromUtf8("_haoyang(%1)").arg(k) + ext;
         used.insert(out);
         j.out = out;
         f.status = WmFile::Waiting;
