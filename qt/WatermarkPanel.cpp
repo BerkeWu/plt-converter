@@ -1,6 +1,7 @@
 #include "WatermarkPanel.h"
 
 #include <QCheckBox>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDir>
 #include <QDirIterator>
@@ -90,6 +91,7 @@ void clearLayout(QLayout* l) {
 // ============================================================================ construction
 
 WatermarkPanel::WatermarkPanel(QWidget* parent) : QWidget(parent) {
+    previewPool_.setMaxThreadCount(1);
     setAcceptDrops(true);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -463,7 +465,7 @@ QWidget* WatermarkPanel::buildRunPage() {
 
 // ============================================================================ helpers
 
-void WatermarkPanel::async(std::function<void()> work, std::function<void()> done) {
+void WatermarkPanel::async(std::function<void()> work, std::function<void()> done, QThreadPool* pool) {
     ++jobs_;
     auto* w = new QFutureWatcher<void>(this);
     connect(w, &QFutureWatcher<void>::finished, this, [this, w, done] {
@@ -471,7 +473,7 @@ void WatermarkPanel::async(std::function<void()> work, std::function<void()> don
         if (done) done();
         w->deleteLater();
     });
-    w->setFuture(QtConcurrent::run(std::move(work)));
+    w->setFuture(pool ? QtConcurrent::run(pool, std::move(work)) : QtConcurrent::run(std::move(work)));
 }
 
 QString WatermarkPanel::letter(int g) const {
@@ -527,7 +529,8 @@ bool WatermarkPanel::clearQueue() {
     if (running_ || pendingAnalysis_ > 0) return false;
     ++previewGen_;
     files_.clear(); recipes_.clear(); sigs_.clear(); extra_.clear();
-    beforeCache_.clear(); textCache_.clear();
+    { QMutexLocker lk(&pvMutex_); drawCache_.clear(); afterFiles_.clear(); }
+    textCache_.clear();
     nGroups_ = 0; manual_ = -1; pltGroup_ = -1; curGroup_ = 0; sample_ = -1; page_ = 1;
     haveShape_ = false; shapeStatus_.clear(); shapeCopies_ = 0; shape_ = {};
     outDir_.clear();
@@ -761,9 +764,11 @@ void WatermarkPanel::syncChrome() {
     } else if (s == 1) {
         next_->setText(tr("开始处理（%1 个文件）").arg(sel));
         next_->setEnabled(sel > 0 && !running_);
+        next_->setToolTip(sel == 0 ? tr("没有勾选任何文件。到「添加文件」页勾选，或给这一组指定要去除的内容后会自动勾选。") : running_ ? tr("正在处理中") : QString());
         int active = 0;
         for (auto& r : recipes_) if (recipeHasContent(r)) ++active;
-        info_->setText(tr("%1 组中有 %2 组已设置去除内容 · 输出到 %3").arg(nGroups_).arg(active).arg(outDir_));
+        info_->setText(sel == 0 ? tr("还没有勾选要处理的文件：在「添加文件」页勾选，或在本页给这一组指定要去除的内容")
+                                : tr("%1 组中有 %2 组已设置去除内容 · 输出到 %3").arg(nGroups_).arg(active).arg(outDir_));
     } else {
         const int nc = cleanedPltFiles().size();
         next_->setText(nc ? tr("转 PLT→PDF（%1 个）· Ctrl+Enter").arg(nc) : tr("打开输出文件夹"));
@@ -932,8 +937,16 @@ void WatermarkPanel::addNeedle(const QString& text) {
     auto& v = recipes_[curGroup_].texts;
     const std::string s = s8(t);
     if (std::find(v.begin(), v.end(), s) != v.end()) return;
+    const bool hadContent = recipeHasContent(recipes_[curGroup_]);
     v.push_back(s);
+    if (!hadContent) tickGroup(curGroup_);
     refreshRecipePanel(); refreshPreview(); refreshTables(); syncChrome();
+}
+
+// A group that had nothing to remove (e.g. the manual one) is off by default; the moment the user gives it something to
+// remove, its files are ticked - otherwise "开始处理" would stay greyed out with 0 files selected.
+void WatermarkPanel::tickGroup(int g) {
+    for (auto& f : files_) if (f.group == g && f.rep.ok) f.selected = true;
 }
 void WatermarkPanel::removeNeedle(int i) {
     if (curGroup_ < 0 || curGroup_ >= recipes_.size()) return;
@@ -1009,30 +1022,72 @@ void WatermarkPanel::refreshPreview() {
     prevPage_->setEnabled(page_ > 1);
     nextPage_->setEnabled(page_ < f.rep.pageCount);
     const quint64 gen = ++previewGen_;
-    const QString key = f.path + "#" + QString::number(page_);
+    removedLbl_->setText(tr("正在生成预览…"));
     wm::Recipe rc = recipes_[curGroup_];
     rc.verify = false;
     const auto also = extraFor(sample_);
-    const QString out = tmp_.filePath(QString("pv%1.pdf").arg(++tmpCounter_));
     const QString path = f.path;
     const int page = page_;
-    auto before = beforeCache_.value(key);
-    auto res = std::make_shared<std::pair<std::shared_ptr<wm::PageDrawing>, std::shared_ptr<wm::PageDrawing>>>();
+    const QString key = previewKey(path, rc, also);
     const bool has = recipeHasContent(rc) || !also.empty();
+    const QString outBase = tmp_.filePath(QString("pv%1.pdf").arg(++tmpCounter_));
+    auto res = std::make_shared<std::pair<std::shared_ptr<wm::PageDrawing>, std::shared_ptr<wm::PageDrawing>>>();
     async([=] {
-        res->first = before ? before : std::make_shared<wm::PageDrawing>(wm::drawPage(fsPath(path), page));
-        if (has) {
-            auto r = wm::applyRecipe(fsPath(path), fsPath(out), rc, also);
-            if (r.ok) res->second = std::make_shared<wm::PageDrawing>(wm::drawPage(fsPath(out), page));
-            QFile::remove(out);
+        auto stale = [&] { return gen != previewGen_.load(); };
+        if (stale()) return;                                            // a newer request exists: do nothing
+        auto cached = [&](const QString& k) { QMutexLocker lk(&pvMutex_); return drawCache_.value(k); };
+        auto remember = [&](const QString& k, const std::shared_ptr<wm::PageDrawing>& d) {
+            QMutexLocker lk(&pvMutex_);
+            if (drawCache_.size() > 24) drawCache_.clear();
+            drawCache_[k] = d;
+        };
+        const QString bk = "b|" + path + "#" + QString::number(page);
+        res->first = cached(bk);
+        if (!res->first) { res->first = std::make_shared<wm::PageDrawing>(wm::drawPage(fsPath(path), page)); remember(bk, res->first); }
+        if (!has) { res->second = res->first; return; }
+        if (stale()) return;
+        const QString ak = "a|" + key + "#" + QString::number(page);
+        res->second = cached(ak);
+        if (res->second) return;
+        QString after;
+        bool known = false;
+        { QMutexLocker lk(&pvMutex_); known = afterFiles_.contains(key); if (known) after = afterFiles_.value(key); }
+        if (!known) {                                                    // the only expensive step: once per (file, recipe)
+            ++previewApply_;
+            auto r = wm::applyRecipe(fsPath(path), fsPath(outBase), rc, also);
+            after = r.ok ? outBase : QString();
+            QMutexLocker lk(&pvMutex_);
+            if (afterFiles_.size() >= 6) {                                // keep a few; drop the rest
+                for (auto it = afterFiles_.begin(); it != afterFiles_.end(); ++it) if (!it.value().isEmpty()) QFile::remove(it.value());
+                afterFiles_.clear();
+                for (auto it = drawCache_.begin(); it != drawCache_.end();) { if (it.key().startsWith("a|")) it = drawCache_.erase(it); else ++it; }
+            }
+            afterFiles_[key] = after;
         }
-        if (!res->second) res->second = res->first;
+        if (stale()) return;
+        if (after.isEmpty()) { res->second = res->first; return; }
+        res->second = std::make_shared<wm::PageDrawing>(wm::drawPage(fsPath(after), page));
+        remember(ak, res->second);
     }, [=] {
-        beforeCache_[key] = res->first;
-        if (gen != previewGen_) return;
-        view_->setDrawings(res->first, res->second);
+        if (gen != previewGen_.load() || !res->first) return;
+        view_->setDrawings(res->first, res->second ? res->second : res->first);
         removedLbl_->setText(view_->removedCount() ? tr("本页将去除 %1 个图元").arg(view_->removedCount()) : tr("本页没有要去除的内容"));
-    });
+    }, &previewPool_);
+}
+
+QString WatermarkPanel::previewKey(const QString& path, const wm::Recipe& rc, const std::vector<int>& also) const {
+    QCryptographicHash h(QCryptographicHash::Sha1);
+    auto add = [&h](const void* d, size_t n) { h.addData(QByteArrayView(static_cast<const char*>(d), qsizetype(n))); };
+    h.addData(path.toUtf8());
+    const char flag = rc.removeDetected ? 1 : 0;
+    add(&flag, 1);
+    for (auto& t : rc.texts) { add(t.data(), t.size()); add("\0", 1); }
+    for (auto& sh : rc.shapes) {
+        for (auto& st : sh.strokes) { for (auto& q : st) { add(&q.first, sizeof(double)); add(&q.second, sizeof(double)); } add("|", 1); }
+        add("#", 1);
+    }
+    for (int i : also) add(&i, sizeof i);
+    return path + "@" + QString::fromLatin1(h.result().toHex().left(16));
 }
 
 // ============================================================================ boxed shapes
@@ -1097,7 +1152,9 @@ void WatermarkPanel::boxShape(double x0, double y0, double x1, double y1) {
 bool WatermarkPanel::commitShape(const QString& name) {
     if (!haveShape_ || curGroup_ < 0 || curGroup_ >= recipes_.size()) return false;
     shape_.name = s8(name);
+    const bool hadContent = recipeHasContent(recipes_[curGroup_]);
     recipes_[curGroup_].shapes.push_back(shape_);
+    if (!hadContent) tickGroup(curGroup_);
     haveShape_ = false;
     shapeStatus_.clear();
     view_->setBox({});
@@ -1109,6 +1166,7 @@ bool WatermarkPanel::commitShape(const QString& name) {
 
 void WatermarkPanel::startRun(int maxFiles) {
     if (running_ || files_.isEmpty() || pendingAnalysis_ > 0) return;
+    ++previewGen_;   // drop previews that have not started yet; the run gets the CPU
     struct Job { int i; QString in, out; wm::Recipe rc; std::vector<int> also; bool plt = false; std::shared_ptr<plt::Document> doc; std::shared_ptr<std::string> data; };
     auto jobs = std::make_shared<std::vector<Job>>();
     QSet<QString> used;

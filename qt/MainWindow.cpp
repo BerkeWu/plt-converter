@@ -1052,13 +1052,19 @@ void MainWindow::requestPlan() {
 
 void MainWindow::runPlan() {
     if (!work_) return;
+    // Single flight: while a plan is being computed, newer requests only mark the plan dirty.  When the running one
+    // finishes it is recomputed once with the latest settings - dragging on a big drawing never queues up a pile of plans.
+    if (planRunning_) { planDirty_ = true; return; }
+    planRunning_ = true; planDirty_ = false;
     ++gen_;
     layout::Params p;
-    try { p = currentParams(); } catch (...) { return; }
+    try { p = currentParams(); } catch (...) { planRunning_ = false; return; }
     auto* w = new QFutureWatcher<PlanResult>(this);
     connect(w, &QFutureWatcher<PlanResult>::finished, this, [this, w] {
         PlanResult r = w->result();
         w->deleteLater();
+        planRunning_ = false;
+        if (planDirty_) { planDirty_ = false; runPlan(); return; }   // settings changed meanwhile: this result is stale
         onPlanResult(r);
     });
     w->setFuture(QtConcurrent::run(computePlan, gen_, std::shared_ptr<const plt::Document>(work_), p, s_.autoOrient, dismissLarger_));

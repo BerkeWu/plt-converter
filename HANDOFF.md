@@ -192,3 +192,10 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 
 ## 第十五轮：清除队列 / 预览缩放 / 输出后缀 haoyang
 - `WatermarkPanel::clearQueue()` + 底栏按钮（有配方时二次确认，`setSilent(true)` 跳过确认）；运行中/分析中拒绝。`DrawView` 增加 zoom_/pan_（fitRect 基准 × zoom，滚轮锚点缩放），`pageToWidget` 供测试。输出名后缀常量在 `WatermarkPanel::startRun` 与 `tools/pdfwm.cpp`；CSV 报告名、输出文件夹名「去水印输出」未改。测试 `clearQueueAndZoom`。
+
+
+## 第十六轮：卡顿/风扇狂转/开始处理置灰（用户反馈）
+- 复现：`WM_REAL=文件1;文件2 test_wmgui idleIsQuiet`：2426（22 页）选组后连续翻页 20 次 = 111 CPU 秒。原因见 CHANGELOG。修复在 `WatermarkPanel::refreshPreview`（previewPool_、previewGen_ 原子、pvMutex_ 保护的 drawCache_/afterFiles_、`previewKey` 指纹）。
+- 约定：任何会被「点击/翻页/拖动」触发的后台计算必须 ①单飞或只认最新 ②按 (输入, 参数) 缓存 ③不与「开始处理」抢同一个线程池。新增此类功能时加一个「快速操作 N 次，计算次数不增加」的测试（参考 `previewApplyCount()`）。
+- 测试注意：会话文件 `batch_session.json` 会让下一个 MainWindow 弹「恢复会话」模态框，测试必须清理（`pltToPdfStaysResponsive` 已处理）。
+- 未能复现：用户说的「+VX: xiangersggzs」水印检测不到——手头所有真实样本（2426、17a8ba2f、小童花边、F54、f57c0ada）在最新版的检测结果与旧版一致（core/wm 自 1d9d75d 起未改动）；需要用户提供那份 PDF。

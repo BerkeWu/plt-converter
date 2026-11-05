@@ -3,6 +3,8 @@
 // A single file is simply a group of one.
 #pragma once
 #include <QHash>
+#include <QMutex>
+#include <QThreadPool>
 #include <QPointer>
 #include <QSet>
 #include <QTemporaryDir>
@@ -73,6 +75,7 @@ public:
     void boxShape(double x0, double y0, double x1, double y1);   // as if the user dragged a box on the preview (page points, top-left origin)
     bool commitShape(const QString& name);                       // add the boxed shape to the current group's recipe
     QString shapeStatus() const;
+    int previewApplyCount() const { return previewApply_.load(); }   // how often a preview had to run the recipe over a whole file (tests)
     DrawView* view() const { return view_; }
     // run
     void startRun(int maxFiles = 0);                         // maxFiles > 0: only the first N files of the current group (试跑)
@@ -100,11 +103,13 @@ private:
     QWidget* buildReviewPage();
     QWidget* buildRunPage();
     QWidget* buildBottom();
-    void async(std::function<void()> work, std::function<void()> done);
+    void async(std::function<void()> work, std::function<void()> done, QThreadPool* pool = nullptr);
+    QString previewKey(const QString& path, const wm::Recipe& rc, const std::vector<int>& also) const;
     void onAnalyzed(int i, const wm::Report& r);
     std::shared_ptr<wm::PageDrawing> pltDrawing(const WmFile& f, const std::vector<size_t>& skip, QPointF* origin) const;
     std::vector<size_t> pltRemovalLines(const WmFile& f, const wm::Recipe& rc) const;
     void regroup();
+    void tickGroup(int g);
     void refreshTables();
     void refreshGroups();
     void refreshReview();
@@ -167,8 +172,14 @@ private:
     int jobs_ = 0;
     bool running_ = false, silent_ = false;
     std::atomic<bool> cancel_{false};
-    quint64 previewGen_ = 0;
-    QHash<QString, std::shared_ptr<wm::PageDrawing>> beforeCache_;
+    // Preview pipeline.  Previews run on their own single-thread pool, newest request wins: an older request that has not
+    // started yet is dropped, and the recipe is applied to the whole file only once per (file, recipe) - page flips only draw.
+    std::atomic<quint64> previewGen_{0};
+    QThreadPool previewPool_;
+    std::atomic<int> previewApply_{0};
+    QMutex pvMutex_;
+    QHash<QString, std::shared_ptr<wm::PageDrawing>> drawCache_;   // "b|file#page" original, "a|key#page" after removal
+    QHash<QString, QString> afterFiles_;                           // key (file + recipe) -> processed temp PDF ("" = failed)
     QHash<QString, std::shared_ptr<std::vector<wm::TextItem>>> textCache_;
     QTemporaryDir tmp_;
     int tmpCounter_ = 0;

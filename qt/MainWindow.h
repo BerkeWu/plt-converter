@@ -304,6 +304,7 @@ private:
     State tmpl_;
     BatchOptions opts_;
     QVector<std::shared_ptr<BatchItem>> items_;
+    bool planRunning_ = false, planDirty_ = false;
     int nextId_ = 1, cur_ = -1;
     QThreadPool scanPool_, autoPool_, exportPool_, loadPool_;
     int scanPending_ = 0, autoPending_ = 0, autoTotal_ = 0;

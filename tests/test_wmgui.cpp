@@ -6,8 +6,14 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QTest>
+#include <QSettings>
+#include <QTimer>
+#include <QElapsedTimer>
+#include "CanvasWidget.h"
+#include "BatchCore.h"
 #include <QWheelEvent>
 #include <cmath>
+#include <sys/resource.h>
 
 #include "DrawView.h"
 #include "MainWindow.h"
@@ -278,6 +284,231 @@ private slots:
         QCOMPARE(p.addFiles({td.filePath("a.pdf")}), 1);
         waitIdle(p);
         QCOMPARE(p.groupCount(), 1);
+    }
+
+    // Real-world files (set WM_REAL to a ';'-separated list of paths): the whole flow must finish in reasonable time.
+    void realFiles() {
+        const QStringList paths = QString::fromLocal8Bit(qgetenv("WM_REAL")).split(';', Qt::SkipEmptyParts);
+        if (paths.isEmpty()) QSKIP("WM_REAL not set");
+        WatermarkPanel p;
+        p.setSilent(true);
+        p.resize(1360, 820);
+        p.show();
+        QElapsedTimer t; t.start();
+        p.addFiles(paths);
+        waitIdle(p, 120000);
+        qInfo() << "analysed in" << t.elapsed() << "ms, groups" << p.groupCount();
+        QVERIFY(!p.busy());
+        for (auto& f : p.files()) qInfo() << f.name << "group" << f.group << "sel" << f.selected << "pages" << f.rep.pageCount << "findings" << (int)f.rep.findings.size();
+        p.goStep(1);
+        for (int g = 0; g < p.groupCount(); ++g) {
+            t.restart();
+            p.selectGroup(g);
+            waitIdle(p, 120000);
+            qInfo() << "review group" << g << t.elapsed() << "ms";
+            QVERIFY(!p.busy());
+        }
+        QCOMPARE(p.step(), 1);
+        // pick the manual group, box a shape, commit, tick the file, run
+        if (p.hasManualGroup()) {
+            const int g = p.groupCount() - 1;
+            p.selectGroup(g); waitIdle(p, 120000);
+            int fi = -1; for (int i = 0; i < p.files().size(); ++i) if (p.files()[i].group == g) { fi = i; break; }
+            if (fi >= 0) {
+                p.setSample(fi); p.setPage(2); waitIdle(p, 120000);
+                t.restart();
+                p.boxShape(315, 590, 365, 712); waitIdle(p, 120000);
+                qInfo() << "box" << t.elapsed() << "ms" << p.shapeStatus();
+                if (p.commitShape("x")) {
+                    waitIdle(p, 120000);
+                    qInfo() << "commit+preview" << t.elapsed() << "ms";
+                    for (int pg = 1; pg <= 4; ++pg) { t.restart(); p.setPage(pg); waitIdle(p, 120000); qInfo() << "page" << pg << t.elapsed() << "ms"; }
+                    p.setFileSelected(fi, true);
+                    p.setOutputDir(QDir::tempPath() + "/wm_real_out");
+                    QSignalSpy done(&p, &WatermarkPanel::runFinished);
+                    t.restart();
+                    p.startRun();
+                    QVERIFY(done.wait(180000));
+                    waitIdle(p, 120000);
+                    qInfo() << "run" << t.elapsed() << "ms";
+                    for (auto& f : p.files()) qInfo() << f.name << f.status << f.res.removedTotal() << f.note;
+                }
+            }
+        }
+    }
+
+    // CPU must go quiet once the work is done (no busy loops, no piled-up jobs)
+    void idleIsQuiet() {
+        const QStringList paths = QString::fromLocal8Bit(qgetenv("WM_REAL")).split(';', Qt::SkipEmptyParts);
+        if (paths.isEmpty()) QSKIP("WM_REAL not set");
+        MainWindow w;
+        w.resize(1360, 820);
+        w.show();
+        w.showWatermark(true);
+        auto* p = w.watermarkPanel();
+        p->addFiles(paths);
+        waitIdle(*p, 120000);
+        p->goStep(1);
+        for (int g = 0; g < p->groupCount(); ++g) { p->selectGroup(g); waitIdle(*p, 120000); }
+        auto cpu = [] { struct rusage ru; getrusage(RUSAGE_SELF, &ru); return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6; };
+        const double c0 = cpu();
+        QTest::qWait(4000);
+        const double used = cpu() - c0;
+        qInfo() << "idle cpu seconds in 4 s:" << used;
+        QVERIFY2(used < 0.5, "UI keeps burning CPU while idle");
+        // flipping pages quickly must not leave a backlog behind
+        p->selectGroup(0); waitIdle(*p, 120000);
+        const double c1 = cpu();
+        for (int k = 0; k < 20; ++k) { p->setPage(1 + k % 5); QTest::qWait(10); }
+        waitIdle(*p, 120000);
+        qInfo() << "20 quick page flips cost cpu seconds:" << cpu() - c1;
+    }
+
+    // PLT -> PDF must stay responsive: no long main-thread stalls, no piled-up background work, quiet when idle.
+    void pltToPdfStaysResponsive() {
+        const QString pltDir = QString::fromLocal8Bit(qgetenv("PLT_DATA"));
+        if (pltDir.isEmpty()) QSKIP("PLT_DATA not set");
+        auto cpu = [] { struct rusage ru; getrusage(RUSAGE_SELF, &ru); return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6; };
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QTemporaryDir cfg; QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, cfg.path());
+        QFile::remove(batchSessionPath());
+        struct Cleanup { ~Cleanup() { QFile::remove(batchSessionPath()); } } cleanup;   // never leave a session behind (it would pop a restore dialog in the next test)
+        // main-thread stall monitor
+        QElapsedTimer clock; clock.start();
+        qint64 last = 0, worst = 0;
+        QTimer tick; tick.setInterval(10);
+        QObject::connect(&tick, &QTimer::timeout, [&] { const qint64 n = clock.elapsed(); worst = std::max(worst, n - last - 10); last = n; });
+        auto resetWorst = [&] { worst = 0; last = clock.elapsed(); };
+        tick.start();
+        auto settle = [&](MainWindow& w, int ms) { QElapsedTimer t; t.start(); while (t.elapsed() < ms) QTest::qWait(20); (void)w; };
+
+        MainWindow w;
+        w.setSilent(true);
+        w.resize(1360, 820);
+        w.show();
+        QSignalSpy loaded(&w, &MainWindow::loaded);
+        double c0 = cpu(); resetWorst();
+        QString biggest; qint64 bs = -1;
+        for (auto& fi : QDir(pltDir).entryInfoList({"*.plt"}, QDir::Files)) if (fi.size() > bs) { bs = fi.size(); biggest = fi.absoluteFilePath(); }
+        qInfo() << "largest file:" << biggest << bs / 1024 << "KB";
+        w.loadFile(biggest);
+        QVERIFY(loaded.wait(30000));
+        QVERIFY(loaded.at(0).at(0).toBool());
+        qInfo() << "load: cpu" << cpu() - c0 << "worst main-thread stall ms" << worst;
+        QVERIFY2(worst < 400, "loading stalls the UI");
+        w.goStep(1);
+        QSignalSpy plan(&w, &MainWindow::planReady);
+        QTest::qWait(800);
+        // drag-like burst of edits
+        c0 = cpu(); resetWorst();
+        for (int k = 0; k < 60; ++k) { w.edit([k](State& s) { s.offX = k * 0.5; s.offY = (k % 7) * 0.5; }, "drag"); QTest::qWait(15); }
+        settle(w, 3000);
+        qInfo() << "60 quick edits: cpu" << cpu() - c0 << "worst stall ms" << worst << "plans" << plan.size();
+        QVERIFY2(worst < 400, "layout edits stall the UI");
+        QVERIFY2(cpu() - c0 < 25, "layout edits burn too much CPU");
+        // zoom / pan on the canvas
+        auto* cv = w.findChild<CanvasWidget*>();
+        QVERIFY(cv);
+        c0 = cpu(); resetWorst();
+        for (int k = 0; k < 40; ++k) {
+            QWheelEvent we(QPointF(300, 300), cv->mapToGlobal(QPointF(300, 300)), QPoint(), QPoint(0, k % 2 ? -120 : 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(cv, &we);
+            QTest::qWait(10);
+        }
+        settle(w, 500);
+        qInfo() << "40 wheel zooms: cpu" << cpu() - c0 << "worst stall ms" << worst;
+        QVERIFY2(worst < 500, "zoom stalls the UI");
+        // idle
+        c0 = cpu(); QTest::qWait(3000);
+        qInfo() << "idle cpu in 3 s:" << cpu() - c0;
+        QVERIFY2(cpu() - c0 < 0.4, "single-file view burns CPU while idle");
+
+        // export
+        QTemporaryDir out;
+        c0 = cpu(); resetWorst();
+        const QString pdf = w.exportBlocking(out.filePath("single.pdf"));
+        qInfo() << "export:" << pdf << "cpu" << cpu() - c0 << "worst stall ms" << worst;
+        QVERIFY2(worst < 600, "export stalls the UI");
+
+        // batch of 20
+        QTemporaryDir bd;
+        const QStringList src = QDir(pltDir).entryList({"*.plt"}, QDir::Files);
+        QStringList files;
+        for (int k = 0; k < 20; ++k) {
+            const QString dst = bd.filePath(QString("f%1_%2").arg(k, 2, 10, QChar('0')).arg(src[k % src.size()]));
+            QVERIFY(QFile::copy(pltDir + "/" + src[k % src.size()], dst));
+            files << dst;
+        }
+        w.setBatchMode(true);
+        c0 = cpu(); resetWorst();
+        w.addBatchFiles(files);
+        QElapsedTimer bt; bt.start();
+        while (bt.elapsed() < 60000) { QTest::qWait(50); bool all = true; for (auto& it : w.batchItems()) if (it->status == ItemStatus::Scanning) all = false; if (w.batchItems().size() == 20 && all) break; }
+        qInfo() << "batch add 20: cpu" << cpu() - c0 << "worst stall ms" << worst << "queued" << w.batchItems().size();
+        QVERIFY2(worst < 600, "adding files stalls the UI");
+        w.goBatchStep(2);
+        c0 = cpu(); resetWorst();
+        QSignalSpy autoDone(&w, &MainWindow::batchAutoFinished);
+        w.batchStartAuto();
+        if (autoDone.isEmpty()) QVERIFY(autoDone.wait(120000));
+        qInfo() << "batch auto layout: cpu" << cpu() - c0 << "worst stall ms" << worst;
+        QVERIFY2(worst < 600, "auto layout stalls the UI");
+        w.batchConfirmAll();
+        w.batchOptions().outDir = out.filePath("batch");
+        w.batchOptions().concurrency = 2;
+        c0 = cpu(); resetWorst();
+        QSignalSpy expDone(&w, &MainWindow::batchExportFinished);
+        w.batchStartExport();
+        if (expDone.isEmpty()) QVERIFY(expDone.wait(300000));
+        qInfo() << "batch export: cpu" << cpu() - c0 << "worst stall ms" << worst << "pdfs" << QDir(out.filePath("batch")).entryList({"*.pdf"}).size();
+        QVERIFY2(worst < 800, "batch export stalls the UI");
+        c0 = cpu(); QTest::qWait(3000);
+        qInfo() << "idle cpu after batch in 3 s:" << cpu() - c0;
+        QVERIFY2(cpu() - c0 < 0.4, "batch view burns CPU while idle");
+    }
+
+    // Regression: flipping pages / clicking around in the review step must not re-run the recipe over the whole file
+    // for every click, and stale requests must not pile up (this once burnt minutes of CPU and made the UI look hung).
+    void reviewDoesNotPileUpWork() {
+        QTemporaryDir td;
+        QVERIFY(QFile::copy(data_ + "/C_flat.pdf", td.filePath("a.pdf")));
+        WatermarkPanel p;
+        p.setSilent(true);
+        p.resize(1360, 820);
+        p.show();
+        p.addFiles({td.filePath("a.pdf")});
+        waitIdle(p);
+        p.goStep(1); p.selectGroup(0); waitIdle(p);
+        const int base = p.previewApplyCount();
+        QVERIFY(base >= 1);
+        const int pages = p.files()[0].rep.pageCount;
+        for (int k = 0; k < 40; ++k) { p.setPage(1 + k % pages); QTest::qWait(3); }
+        waitIdle(p);
+        QCOMPARE(p.previewApplyCount(), base);                 // pages of the same file + recipe: drawing only
+        p.addNeedle("zzz-not-there"); waitIdle(p);              // recipe changed: exactly one more pass
+        QCOMPARE(p.previewApplyCount(), base + 1);
+        for (int k = 0; k < 40; ++k) { p.setPage(1 + k % pages); QTest::qWait(3); }
+        waitIdle(p);
+        QCOMPARE(p.previewApplyCount(), base + 1);
+        QVERIFY(!p.busy());
+    }
+
+    // The "开始处理" button must not stay grey after the user told the manual group what to remove.
+    void manualGroupGetsTickedWhenGivenWork() {
+        QTemporaryDir td;
+        QVERIFY(QFile::copy(data_ + "/A_clean.pdf", td.filePath("a.pdf")));
+        WatermarkPanel p;
+        p.setSilent(true);
+        p.resize(1360, 820);
+        p.show();
+        p.addFiles({td.filePath("a.pdf")});
+        waitIdle(p);
+        QVERIFY(p.hasManualGroup());
+        QVERIFY(!p.files()[0].selected);
+        p.goStep(1); p.selectGroup(0); waitIdle(p);
+        p.addNeedle("something");
+        waitIdle(p);
+        QVERIFY(p.files()[0].selected);
     }
 
     void insideMainWindow() {
