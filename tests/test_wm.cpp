@@ -51,6 +51,75 @@ int main(int argc, char** argv) {
         auto again = wm::analyze(o);
         CHECK(!again.hasRemovable());
     }
+    // G: Acrobat-style background/watermark form (tilt + opacity live inside the form; Apple Preview does not draw it, WPS does)
+    {
+        auto r = wm::analyze(dir / "G_acrobat_bg.pdf");
+        CHECK(r.ok); CHECK(r.pageCount == 6);
+        const wm::Finding* art = nullptr;
+        for (auto& f : r.findings) if (f.kind == wm::Kind::ArtifactObject) art = &f;
+        CHECK(art != nullptr);
+        if (art) { CHECK(art->tier == wm::Tier::High); CHECK(art->score >= 85); CHECK(art->pages == 5); CHECK(art->contactText); }
+        auto o = tmp("wm_G_out.pdf");
+        auto rr = wm::remove(dir / "G_acrobat_bg.pdf", o);
+        CHECK(rr.ok); CHECK(rr.formsRemoved == 5);
+        auto h = hist(o), b = hist(dir / "G_acrobat_bg.pdf");
+        for (const char* k : {"m", "l", "c", "re", "S", "Tj"}) CHECK(h.ops[k] == b.ops[k]);   // pattern lines and the page number are untouched
+        CHECK(!wm::analyze(o).hasRemovable());
+    }
+    // B: shop banner drawn in the pattern's own layer (contact text on a coloured block + icons + QR code)
+    {
+        auto r = wm::analyze(dir / "B_block.pdf");
+        CHECK(r.ok); CHECK(r.pageCount == 8);
+        const wm::Finding* blk = nullptr;
+        for (auto& f : r.findings) if (f.kind == wm::Kind::LayerBlock) blk = &f;
+        CHECK(blk != nullptr);
+        if (blk) { CHECK(blk->tier == wm::Tier::High); CHECK(blk->score >= 75); CHECK(blk->pages == 8); CHECK(blk->contactText); }
+        auto o = tmp("wm_B_out.pdf");
+        auto rr = wm::remove(dir / "B_block.pdf", o);
+        CHECK(rr.ok); CHECK(rr.blockItemsRemoved > 100);
+        auto h = hist(o), b = hist(dir / "B_block.pdf");
+        CHECK(h.ops["S"] == b.ops["S"]);                                     // every stroked pattern line is still there
+        CHECK(h.ops["l"] > 0.8 * b.ops["l"]);                                // (only the icons' filled outlines went)
+        CHECK(h.ops["Tj"] < b.ops["Tj"] && h.ops["Tj"] >= 8);               // contact text gone, one page number per page kept
+        CHECK(h.ops["Do"] < b.ops["Do"]);                                    // QR image and the grey backing form are gone
+        auto again = wm::analyze(o);
+        for (auto& f : again.findings) CHECK(f.kind != wm::Kind::LayerBlock);
+    }
+    // H: characters drawn as line strokes ("小红叶501" in a CAD single-stroke font): box one instance, remove every copy
+    {
+        const auto src = dir / "H_vector_text.pdf";
+        CHECK(wm::analyze(src).ok);
+        auto o = tmp("wm_H_out.pdf");
+        auto bad = wm::removeShape(src, o, 2, {315, 590, 365, 712});
+        CHECK(bad.ok);
+        CHECK(bad.selected >= 12 && bad.selected <= 14);
+        CHECK(bad.copies >= 6);                       // copies of different size, turned by 180 degrees, and cut by the page edge
+        CHECK(bad.removed >= 90 && bad.removed <= 130);
+        CHECK(bad.pagesTouched.size() >= 7);
+        auto h = hist(o), b = hist(src);
+        CHECK(h.ops["S"] == b.ops["S"] - bad.removed + 0 || h.ops["S"] < b.ops["S"]);
+        CHECK(h.ops["S"] >= b.ops["S"] - bad.removed - 2);                   // nothing else was dropped
+        auto none = wm::removeShape(src, o, 2, {0, 0, 5, 5});
+        CHECK(!none.ok);                              // empty box -> clear error, no output
+        auto only = wm::removeShape(src, o, 2, {315, 590, 365, 712}, false);
+        CHECK(only.ok && only.removed == only.selected && only.copies == 0);
+    }
+    // real text by content (decoded through ToUnicode)
+    {
+        std::string err;
+        auto items = wm::listText(dir / "B_block.pdf", &err);
+        bool haveHandle = false, haveWx = false;
+        for (auto& t : items) { if (t.text == "Snowaishougong") haveHandle = true; if (t.text == "微信") haveWx = true; }
+        CHECK(haveHandle && haveWx);
+        auto o = tmp("wm_T_out.pdf");
+        auto rr = wm::removeText(dir / "B_block.pdf", o, {"Snowaishougong", "992762650"});
+        CHECK(rr.ok); CHECK(rr.removed >= 16);
+        bool left = false;
+        for (auto& t : wm::listText(o)) if (t.text.find("Snowaishougong") != std::string::npos || t.text.find("992762650") != std::string::npos) left = true;
+        CHECK(!left);
+        CHECK(!wm::removeText(dir / "B_block.pdf", o, {"不存在的内容"}).ok);
+        CHECK(!wm::removeText(dir / "H_vector_text.pdf", o, {"小红叶"}).ok);   // strokes are not text: told to use the box instead
+    }
     // C, D: flattened diagonal text
     for (const char* name : {"C_flat.pdf", "D_flat.pdf"}) {
         auto r = wm::analyze(dir / name);
