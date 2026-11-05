@@ -176,6 +176,7 @@ private:
     // started yet is dropped, and the recipe is applied to the whole file only once per (file, recipe) - page flips only draw.
     std::atomic<quint64> previewGen_{0};
     QThreadPool previewPool_;
+    QThreadPool workPool_;
     std::atomic<int> previewApply_{0};
     QMutex pvMutex_;
     QHash<QString, std::shared_ptr<wm::PageDrawing>> drawCache_;   // "b|file#page" original, "a|key#page" after removal

@@ -67,6 +67,35 @@ int main(int argc, char** argv) {
         for (const char* k : {"m", "l", "c", "re", "S", "Tj"}) CHECK(h.ops[k] == b.ops[k]);   // pattern lines and the page number are untouched
         CHECK(!wm::analyze(o).hasRemovable());
     }
+    // I: tilted grey text in a Form XObject that sits at different positions on each (cut) page
+    {
+        auto r = wm::analyze(dir / "I_tilt_form.pdf");
+        CHECK(r.ok); CHECK(r.pageCount == 3);
+        CHECK(!r.findings.empty());
+        if (!r.findings.empty()) { CHECK(r.findings[0].kind == wm::Kind::ArtifactObject); CHECK(r.findings[0].tier == wm::Tier::High); CHECK(r.findings[0].pages >= 2); }
+        auto o = tmp("wm_I_out.pdf");
+        auto rr = wm::remove(dir / "I_tilt_form.pdf", o);
+        CHECK(rr.ok); CHECK(rr.formsRemoved >= 2);
+        CHECK(!wm::analyze(o).hasRemovable());
+        auto h = hist(o), b = hist(dir / "I_tilt_form.pdf");
+        for (const char* k : {"m", "l", "c", "re", "S"}) CHECK(h.ops[k] == b.ops[k]);
+        CHECK(h.ops["Do"] < b.ops["Do"]);
+    }
+    // J: Acrobat "Fill & Sign" contact text (nested form, ADBE_FillSign) + tiled tilted contact text; the page number stays
+    {
+        auto r = wm::analyze(dir / "J_fillsign.pdf");
+        CHECK(r.ok); CHECK(r.pageCount == 3);
+        const wm::Finding* fs = nullptr; const wm::Finding* tiled = nullptr;
+        for (auto& f : r.findings) { if (f.kind == wm::Kind::ArtifactObject && !fs) fs = &f; if (f.kind == wm::Kind::LayerBlock) tiled = &f; }
+        CHECK(fs != nullptr); CHECK(tiled != nullptr);
+        if (fs) { CHECK(fs->tier == wm::Tier::High); CHECK(fs->contactText); CHECK(fs->pages == 3); }
+        auto o = tmp("wm_J_out.pdf");
+        auto rr = wm::remove(dir / "J_fillsign.pdf", o);
+        CHECK(rr.ok);
+        auto again = wm::analyze(o);
+        for (auto& f : again.findings) CHECK(f.tier != wm::Tier::High);
+        CHECK(hist(o).ops["S"] == hist(dir / "J_fillsign.pdf").ops["S"]);   // pattern lines untouched
+    }
     // B: shop banner drawn in the pattern's own layer (contact text on a coloured block + icons + QR code)
     {
         auto r = wm::analyze(dir / "B_block.pdf");

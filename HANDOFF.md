@@ -199,3 +199,11 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - 约定：任何会被「点击/翻页/拖动」触发的后台计算必须 ①单飞或只认最新 ②按 (输入, 参数) 缓存 ③不与「开始处理」抢同一个线程池。新增此类功能时加一个「快速操作 N 次，计算次数不增加」的测试（参考 `previewApplyCount()`）。
 - 测试注意：会话文件 `batch_session.json` 会让下一个 MainWindow 弹「恢复会话」模态框，测试必须清理（`pltToPdfStaysResponsive` 已处理）。
 - 未能复现：用户说的「+VX: xiangersggzs」水印检测不到——手头所有真实样本（2426、17a8ba2f、小童花边、F54、f57c0ada）在最新版的检测结果与旧版一致（core/wm 自 1d9d75d 起未改动）；需要用户提供那份 PDF。
+
+
+## 第十七轮：文档1/文档2 漏检、全类型复查、性能
+- 文档1：Form XObject 内的倾斜灰色文字，每页位置不同 → `detectArtifacts` 用 `textSig` 聚类（`DoRec.textSig`，`Finding.extraKeys` 存同簇其余表单键，`remove()` 一并丢弃）。
+- 文档2：Fill & Sign 嵌套表单（`DoRec.fillSign`，`decodeFormText` 经 ToUnicode 解码），+60，联系方式再 +25；同层平铺倾斜文字在 `detectBlocks` 里 +30（`Ev.angle`）。
+- 性能：`core/wm/wm.cpp` 自写 `Tokenizer`/`Arg`/`Instr`（保留原文字节，序列化不改写数字）；`traceEvents(..., keepPts=false)`；`WatermarkPanel::workPool_`（≤3 线程、低优先级）。仍可优化：`applyRecipe`/`drawPage`/`countStrokes` 各自重复解析整份文件（文档2 首次审阅预览约 7 s，后台单线程、有缓存）。
+- 位图型（e8cf131f）：页面由 11 块 JPEG 拼成，水印在像素里，无独立对象，不可去除。
+- 回归：tests/test_wm.cpp 新增 I、J 两段；ctest 5/5。

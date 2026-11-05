@@ -1,6 +1,7 @@
 #include "wm.h"
 
 #include <qpdf/Buffer.hh>
+#include <qpdf/Pl_Buffer.hh>
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFObjectHandle.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -46,31 +48,220 @@ bool axisAligned(double deg) {
 }
 
 // ---------------- content stream <-> instruction list ----------------
-struct Instr {
-    std::vector<QPDFObjectHandle> a;
-    std::string op;
-    QPDFObjectHandle inl;
-    bool isInline = false;
-};
-class Collect : public QPDFObjectHandle::ParserCallbacks {
-public:
-    std::vector<Instr> out;
-    std::vector<QPDFObjectHandle> pend;
-    void handleObject(QPDFObjectHandle o) override {
-        if (o.isOperator()) {
-            Instr i; i.a = pend; i.op = o.getOperatorValue();
-            out.push_back(std::move(i)); pend.clear();
-        } else if (o.isInlineImage()) {
-            Instr i; i.isInline = true; i.inl = o; i.op = "BI";
-            out.push_back(std::move(i)); pend.clear();
-        } else pend.push_back(o);
+// A small hand-written content-stream tokenizer.  QPDF's own parser builds a heap object per token and made a 9 MB pattern
+// PDF cost 8 s of CPU just to read; this one is ~10x faster and keeps the source text of every operand, so rewriting a
+// stream reproduces the numbers byte for byte.  Arg offers the few QPDFObjectHandle methods the code below uses.
+struct Arg {
+    enum Kind : unsigned char { Num, Name, Str, Arr, Other } k = Other;
+    double n = 0;
+    std::string s;                                  // Name: "/Name" (decoded); Str: decoded bytes; Num/Other: source text
+    std::shared_ptr<std::vector<Arg>> arr;          // Arr
+    bool isNumber() const { return k == Num; }
+    bool isName() const { return k == Name; }
+    bool isString() const { return k == Str; }
+    bool isArray() const { return k == Arr; }
+    double getNumericValue() const { return n; }
+    const std::string& getName() const { return s; }
+    const std::string& getStringValue() const { return s; }
+    int getArrayNItems() const { return arr ? (int)arr->size() : 0; }
+    const Arg& getArrayItem(int i) const { return (*arr)[i]; }
+    std::string raw;                                // exact source text (empty for Arr: rebuilt)
+    std::string unparse() const {
+        if (k == Arr) { std::string o = "["; for (auto& e : *arr) { o += e.unparse(); o += ' '; } o += "]"; return o; }
+        if (!raw.empty()) return raw;
+        if (k == Num) { char b[48]; std::snprintf(b, sizeof b, "%.6g", n); return b; }
+        return s;
     }
-    void handleEOF() override {}
+    static Arg real(double v, int decimals) {
+        Arg a; a.k = Num; a.n = v;
+        char b[48]; std::snprintf(b, sizeof b, "%.*f", decimals, v);
+        std::string t = b;
+        if (t.find('.') != std::string::npos) { while (!t.empty() && t.back() == '0') t.pop_back(); if (!t.empty() && t.back() == '.') t.pop_back(); }
+        a.raw = t.empty() ? "0" : t;
+        return a;
+    }
 };
+struct Instr {
+    std::vector<Arg> a;
+    std::string op;
+    bool isInline = false;            // op == "BI": a[0].raw holds the whole inline image (BI ... ID data EI)
+};
+
+class Tokenizer {
+public:
+    Tokenizer(const char* d, size_t n) : p_(d), e_(d + n), b_(d) {}
+    std::vector<Instr> run() {
+        std::vector<Instr> out;
+        std::vector<Arg> pend;
+        while (true) {
+            skipWs();
+            if (p_ >= e_) break;
+            const char c = *p_;
+            if (c == '/' || c == '(' || c == '[' || c == '<' || c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) {
+                Arg a;
+                if (readOperand(a)) { pend.push_back(std::move(a)); continue; }
+                if (a.k == Arg::Other && a.raw.empty()) continue;      // stray byte skipped
+                pend.push_back(std::move(a)); continue;
+            }
+            if (c == ']' || c == '>' || c == ')' || c == '{' || c == '}') { ++p_; continue; }
+            // operator keyword
+            const char* st = p_;
+            while (p_ < e_ && !isWs(*p_) && !isDelim(*p_)) ++p_;
+            if (p_ == st) { ++p_; continue; }
+            Instr i; i.op.assign(st, p_ - st);
+            if (i.op == "BI") {
+                const char* end = inlineImageEnd(st);
+                Arg a; a.k = Arg::Other; a.raw.assign(st, end - st);
+                i.isInline = true; i.a.push_back(std::move(a));
+                p_ = end; pend.clear();
+                out.push_back(std::move(i)); continue;
+            }
+            i.a = std::move(pend); pend.clear();
+            out.push_back(std::move(i));
+        }
+        return out;
+    }
+private:
+    const char *p_, *e_, *b_;
+    static bool isWs(char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\0'; }
+    static bool isDelim(char c) { return c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' || c == '}' || c == '/' || c == '%'; }
+    void skipWs() {
+        while (p_ < e_) {
+            if (isWs(*p_)) ++p_;
+            else if (*p_ == '%') { while (p_ < e_ && *p_ != '\n' && *p_ != '\r') ++p_; }
+            else break;
+        }
+    }
+    static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+    // returns true when `a` is a complete operand
+    bool readOperand(Arg& a) {
+        const char* st = p_;
+        const char c = *p_;
+        if (c == '/') {
+            ++p_;
+            std::string nm = "/";
+            while (p_ < e_ && !isWs(*p_) && !isDelim(*p_)) {
+                if (*p_ == '#' && p_ + 2 < e_ + 0 && hexv(p_[1]) >= 0 && hexv(p_[2]) >= 0) { nm += char(hexv(p_[1]) * 16 + hexv(p_[2])); p_ += 3; }
+                else nm += *p_++;
+            }
+            a.k = Arg::Name; a.s = std::move(nm); a.raw.assign(st, p_ - st);
+            return true;
+        }
+        if (c == '(') {
+            ++p_;
+            int depth = 1; std::string v;
+            while (p_ < e_ && depth > 0) {
+                char ch = *p_++;
+                if (ch == '\\' && p_ < e_) {
+                    char nx = *p_++;
+                    switch (nx) {
+                    case 'n': v += '\n'; break; case 'r': v += '\r'; break; case 't': v += '\t'; break;
+                    case 'b': v += '\b'; break; case 'f': v += '\f'; break;
+                    case '\r': if (p_ < e_ && *p_ == '\n') ++p_; break;
+                    case '\n': break;
+                    default:
+                        if (nx >= '0' && nx <= '7') {
+                            int o = nx - '0';
+                            for (int k = 0; k < 2 && p_ < e_ && *p_ >= '0' && *p_ <= '7'; ++k) o = o * 8 + (*p_++ - '0');
+                            v += char(o & 0xFF);
+                        } else v += nx;
+                    }
+                } else if (ch == '(') { ++depth; v += ch; }
+                else if (ch == ')') { if (--depth > 0) v += ch; }
+                else v += ch;
+            }
+            a.k = Arg::Str; a.s = std::move(v); a.raw.assign(st, p_ - st);
+            return true;
+        }
+        if (c == '<') {
+            if (p_ + 1 < e_ && p_[1] == '<') {                       // dictionary: keep as source text
+                int depth = 0;
+                while (p_ < e_) {
+                    if (p_ + 1 < e_ && p_[0] == '<' && p_[1] == '<') { ++depth; p_ += 2; }
+                    else if (p_ + 1 < e_ && p_[0] == '>' && p_[1] == '>') { --depth; p_ += 2; if (depth == 0) break; }
+                    else if (*p_ == '(') { int d = 1; ++p_; while (p_ < e_ && d > 0) { if (*p_ == '\\') ++p_; else if (*p_ == '(') ++d; else if (*p_ == ')') --d; ++p_; } }
+                    else ++p_;
+                }
+                a.k = Arg::Other; a.raw.assign(st, p_ - st);
+                return true;
+            }
+            ++p_;
+            std::string v; int hi = -1;
+            while (p_ < e_ && *p_ != '>') {
+                int h = hexv(*p_++);
+                if (h < 0) continue;
+                if (hi < 0) hi = h; else { v += char(hi * 16 + h); hi = -1; }
+            }
+            if (hi >= 0) v += char(hi * 16);
+            if (p_ < e_) ++p_;
+            a.k = Arg::Str; a.s = std::move(v); a.raw.assign(st, p_ - st);
+            return true;
+        }
+        if (c == '[') {
+            ++p_;
+            a.k = Arg::Arr; a.arr = std::make_shared<std::vector<Arg>>();
+            while (true) {
+                skipWs();
+                if (p_ >= e_) break;
+                if (*p_ == ']') { ++p_; break; }
+                Arg e;
+                const char ch = *p_;
+                if (ch == '/' || ch == '(' || ch == '[' || ch == '<' || ch == '-' || ch == '+' || ch == '.' || (ch >= '0' && ch <= '9')) { readOperand(e); a.arr->push_back(std::move(e)); }
+                else { const char* t = p_; while (p_ < e_ && !isWs(*p_) && !isDelim(*p_)) ++p_; if (p_ == t) ++p_; }   // stray keyword (true/false/null)
+            }
+            return true;
+        }
+        // number
+        const char* q = p_;
+        bool neg = false;
+        if (*q == '-' || *q == '+') { neg = *q == '-'; ++q; }
+        double iv = 0, scale = 1; bool dot = false, digits = false;
+        const char* t = q;
+        while (t < e_ && !isWs(*t) && !isDelim(*t)) {
+            if (*t >= '0' && *t <= '9') { digits = true; if (dot) { scale *= 0.1; iv += (*t - '0') * scale; } else iv = iv * 10 + (*t - '0'); }
+            else if (*t == '.' && !dot) dot = true;
+            else if (*t == '-') { /* "1-2" style garbage: ignore the minus like Acrobat does */ }
+            else { digits = false; break; }
+            ++t;
+        }
+        if (digits) {
+            p_ = t;
+            a.k = Arg::Num; a.n = neg ? -iv : iv; a.raw.assign(st, p_ - st);
+            return true;
+        }
+        // not a number (e.g. "-" alone or "+x"): treat the word as an operator-like junk token and drop it
+        while (p_ < e_ && !isWs(*p_) && !isDelim(*p_)) ++p_;
+        if (p_ == st) ++p_;
+        return false;
+    }
+    // `st` points at "BI".  Returns the position just after the matching EI.
+    const char* inlineImageEnd(const char* st) {
+        const char* q = st + 2;
+        // key/value pairs up to the ID keyword
+        while (q < e_) {
+            while (q < e_ && isWs(*q)) ++q;
+            if (q + 1 < e_ && q[0] == 'I' && q[1] == 'D' && (q + 2 >= e_ || isWs(q[2]))) { q += 2; break; }
+            if (*q == '(') { int d = 1; ++q; while (q < e_ && d > 0) { if (*q == '\\') ++q; else if (*q == '(') ++d; else if (*q == ')') --d; ++q; } }
+            else if (*q == '[' || *q == '<' || *q == '/') { ++q; while (q < e_ && !isWs(*q) && !(isDelim(*q) && *q != '/' && *q != '<' && *q != '>')) { if (*q == '/' ) break; ++q; } }
+            else while (q < e_ && !isWs(*q) && !isDelim(*q)) ++q;
+        }
+        if (q < e_) ++q;   // the single whitespace after ID
+        for (; q + 1 < e_; ++q) {
+            if (q[0] == 'E' && q[1] == 'I' && isWs(q[-1]) && (q + 2 >= e_ || isWs(q[2]) || isDelim(q[2]))) {
+                bool ok = true;   // what follows must look like content-stream text
+                for (const char* r = q + 2; r < e_ && r < q + 12; ++r) if ((unsigned char)*r > 127 || (*r < 32 && !isWs(*r))) { ok = false; break; }
+                if (ok) return q + 2;
+            }
+        }
+        return e_;
+    }
+};
+std::vector<Instr> parseBytes(const char* d, size_t n) { return Tokenizer(d, n).run(); }
+
 std::string serialize(std::vector<Instr>& v) {
     std::string s;
     for (auto& i : v) {
-        if (i.isInline) { s += i.inl.unparse(); s += '\n'; continue; }
+        if (i.isInline) { s += i.a[0].raw; s += '\n'; continue; }
         for (auto& o : i.a) { s += o.unparse(); s += ' '; }
         s += i.op; s += '\n';
     }
@@ -98,6 +289,8 @@ struct DoRec {
     std::string key; bool textOnly = false, contact = false; std::string stream;
     // facts read from inside the form (Acrobat-style stamps keep the tilt and the opacity in the form itself)
     bool hasInnerAngle = false; double innerAngle = 0; double innerAlpha = 1; bool acrobat = false;
+    bool fillSign = false, hasDecoded = false;   // Acrobat "Fill & Sign" text added afterwards (nested forms); decoded text found
+    std::string textSig;                          // hash of the strings the form shows (same text at different places has the same sig)
 };
 struct PageInfo {
     std::vector<TextBlock> tbs;
@@ -133,7 +326,129 @@ std::string collectStrings(std::vector<Instr>& v) {
 }
 
 std::vector<Instr> parsePage(QPDFPageObjectHelper& p) {
-    Collect cb; p.parseContents(&cb); return std::move(cb.out);
+    Pl_Buffer pl("page");
+    try { p.getObjectHandle().pipePageContents(&pl); } catch (...) { return {}; }
+    pl.finish();
+    auto buf = std::unique_ptr<Buffer>(pl.getBuffer());
+    return parseBytes((const char*)buf->getBuffer(), buf->getSize());
+}
+std::vector<Instr> parseForm(QPDFObjectHandle x, std::string* raw = nullptr) {
+    auto buf = x.getStreamData(qpdf_dl_generalized);
+    if (raw) raw->assign((const char*)buf->getBuffer(), buf->getSize());
+    return parseBytes((const char*)buf->getBuffer(), buf->getSize());
+}
+
+struct FontMap { int width = 1; bool has = false; std::map<unsigned, std::u16string> m; };
+std::string u16ToU8(const std::u16string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned c = s[i];
+        if (c >= 0xD800 && c < 0xDC00 && i + 1 < s.size()) { c = 0x10000 + ((c - 0xD800) << 10) + (s[i + 1] - 0xDC00); ++i; }
+        if (c < 0x80) o += (char)c;
+        else if (c < 0x800) { o += (char)(0xC0 | (c >> 6)); o += (char)(0x80 | (c & 63)); }
+        else if (c < 0x10000) { o += (char)(0xE0 | (c >> 12)); o += (char)(0x80 | ((c >> 6) & 63)); o += (char)(0x80 | (c & 63)); }
+        else { o += (char)(0xF0 | (c >> 18)); o += (char)(0x80 | ((c >> 12) & 63)); o += (char)(0x80 | ((c >> 6) & 63)); o += (char)(0x80 | (c & 63)); }
+    }
+    return o;
+}
+std::vector<std::string> hexTokens(const std::string& s) {   // every <...> group, as raw hex digits
+    std::vector<std::string> t;
+    for (size_t i = 0; i < s.size(); ++i) if (s[i] == '<' && (i + 1 >= s.size() || s[i + 1] != '<')) {
+        size_t j = s.find('>', i);
+        if (j == std::string::npos) break;
+        std::string h; for (size_t k = i + 1; k < j; ++k) if (std::isxdigit((unsigned char)s[k])) h += s[k];
+        t.push_back(h); i = j;
+    }
+    return t;
+}
+unsigned hexVal(const std::string& h) { return (unsigned)std::strtoul(h.c_str(), nullptr, 16); }
+std::u16string hexU16(const std::string& h) { std::u16string u; for (size_t i = 0; i + 3 < h.size() + 0; i += 4) u += (char16_t)hexVal(h.substr(i, 4)); if (h.size() == 2) u += (char16_t)hexVal(h); return u; }
+FontMap loadFont(QPDFObjectHandle f) {
+    FontMap fm;
+    if (!f.isDictionary()) return fm;
+    auto st = f.getKey("/Subtype");
+    if (st.isName() && st.getName() == "/Type0") fm.width = 2;
+    auto tu = f.getKey("/ToUnicode");
+    if (!tu.isStream()) return fm;
+    try {
+        auto buf = tu.getStreamData(qpdf_dl_generalized);
+        std::string d((const char*)buf->getBuffer(), buf->getSize());
+        size_t cs = d.find("begincodespacerange");
+        if (cs != std::string::npos) { auto t = hexTokens(d.substr(cs, d.find("endcodespacerange", cs) - cs)); if (!t.empty()) fm.width = std::max<int>(1, (int)t[0].size() / 2); }
+        size_t pos = 0;
+        while ((pos = d.find("beginbfchar", pos)) != std::string::npos) {
+            size_t e = d.find("endbfchar", pos); auto t = hexTokens(d.substr(pos, e - pos));
+            for (size_t i = 0; i + 1 < t.size(); i += 2) fm.m[hexVal(t[i])] = hexU16(t[i + 1]);
+            pos = e;
+        }
+        pos = 0;
+        while ((pos = d.find("beginbfrange", pos)) != std::string::npos) {
+            size_t e = d.find("endbfrange", pos); std::string blk = d.substr(pos, e - pos);
+            // <lo> <hi> <dst>  or  <lo> <hi> [<d1> <d2> ...]
+            size_t q = 0;
+            while (q < blk.size()) {
+                size_t a = blk.find('<', q); if (a == std::string::npos) break;
+                size_t a2 = blk.find('>', a), b = blk.find('<', a2), b2 = blk.find('>', b);
+                if (b == std::string::npos) break;
+                size_t c = blk.find_first_not_of(" \r\n\t", b2 + 1);
+                std::string lo, hi; for (size_t k = a + 1; k < a2; ++k) lo += blk[k]; for (size_t k = b + 1; k < b2; ++k) hi += blk[k];
+                if (c != std::string::npos && blk[c] == '[') {
+                    size_t endArr = blk.find(']', c); auto t = hexTokens(blk.substr(c, endArr - c));
+                    for (size_t i = 0; i < t.size(); ++i) fm.m[hexVal(lo) + (unsigned)i] = hexU16(t[i]);
+                    q = endArr + 1;
+                } else if (c != std::string::npos && blk[c] == '<') {
+                    size_t c2 = blk.find('>', c); std::string dst; for (size_t k = c + 1; k < c2; ++k) dst += blk[k];
+                    std::u16string base = hexU16(dst);
+                    for (unsigned code = hexVal(lo); code <= hexVal(hi) && code - hexVal(lo) < 65536; ++code) { std::u16string u = base; if (!u.empty()) u.back() = (char16_t)(u.back() + (code - hexVal(lo))); fm.m[code] = u; }
+                    q = c2 + 1;
+                } else break;
+            }
+            pos = e;
+        }
+        fm.has = !fm.m.empty();
+    } catch (...) {}
+    return fm;
+}
+std::string decodeShown(const std::string& raw, const FontMap& fm) {
+    std::u16string u;
+    const int w = fm.has ? fm.width : 1;
+    for (size_t i = 0; i + w <= raw.size(); i += w) {
+        unsigned code = 0; for (int k = 0; k < w; ++k) code = (code << 8) | (unsigned char)raw[i + k];
+        auto it = fm.m.find(code);
+        if (it != fm.m.end()) u += it->second;
+        else if (!fm.has && code < 128) u += (char16_t)code;
+        else if (!fm.has) u += (char16_t)code;   // Latin-1 fallback
+    }
+    return u16ToU8(u);
+}
+
+// Text of a Form XObject as Unicode (nested forms included), only for fonts that carry a ToUnicode map.
+std::string decodeFormText(QPDFObjectHandle x, int depth = 0) {
+    std::string out;
+    if (depth > 4 || !x.isStream()) return out;
+    try {
+        auto ins = parseForm(x);
+        QPDFObjectHandle res = x.getDict().getKey("/Resources");
+        QPDFObjectHandle fonts = res.isDictionary() ? res.getKey("/Font") : QPDFObjectHandle::newNull();
+        QPDFObjectHandle xo = res.isDictionary() ? res.getKey("/XObject") : QPDFObjectHandle::newNull();
+        std::map<std::string, FontMap> fm; FontMap cur;
+        for (auto& i : ins) {
+            if (i.op == "Tf" && !i.a.empty() && i.a[0].isName() && fonts.isDictionary()) {
+                const std::string nm = i.a[0].getName();
+                auto it = fm.find(nm);
+                if (it == fm.end()) it = fm.emplace(nm, loadFont(fonts.getKey(nm))).first;
+                cur = it->second;
+            } else if ((i.op == "Tj" || i.op == "TJ") && cur.has) {
+                for (auto& o : i.a) {
+                    if (o.isString()) out += decodeShown(o.getStringValue(), cur);
+                    else if (o.isArray()) for (int k = 0; k < o.getArrayNItems(); ++k) if (o.getArrayItem(k).isString()) out += decodeShown(o.getArrayItem(k).getStringValue(), cur);
+                }
+                out += ' ';
+            } else if (i.op == "T*" || i.op == "TD" || i.op == "'") out += ' ';
+            else if (i.op == "Do" && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) out += decodeFormText(xo.getKey(i.a[0].getName()), depth + 1);
+        }
+    } catch (...) {}
+    return out;
 }
 
 double extAlpha(QPDFObjectHandle res, const std::string& name) {
@@ -234,22 +549,24 @@ PageInfo tracePage(QPDFPageObjectHelper& page, std::vector<Instr>& ins, std::map
                     if (it == formCache.end()) {
                         DoRec f;
                         try {
-                            auto buf = x.getStreamData(qpdf_dl_generalized);
-                            f.stream.assign((const char*)buf->getBuffer(), buf->getSize());
-                            Collect cb; x.parseAsContents(&cb);
+                            auto fins = parseForm(x, &f.stream);
                             QPDFObjectHandle fres = x.getDict().getKey("/Resources");
-                            FormFacts ff = scanForm(cb.out, fres.isDictionary() ? fres : res);
+                            FormFacts ff = scanForm(fins, fres.isDictionary() ? fres : res);
                             f.textOnly = ff.text && !ff.other;
                             f.hasInnerAngle = ff.hasAngle; f.innerAngle = ff.angle; f.innerAlpha = ff.alpha;
-                            f.contact = looksLikeContact(collectStrings(cb.out));
+                            f.contact = looksLikeContact(collectStrings(fins));
                             auto pinfo = x.getDict().getKey("/PieceInfo");
                             f.acrobat = pinfo.isDictionary() && pinfo.hasKey("/ADBE_CompoundType");
+                            f.fillSign = x.getDict().hasKey("/ADBE_FillSign");
+                            if (f.fillSign) { const std::string t = decodeFormText(x); f.hasDecoded = !t.empty(); f.contact = f.contact || looksLikeContact(t); }
+                            if (f.textOnly) { const std::string cs = collectStrings(fins); if (!cs.empty()) f.textSig = std::to_string(std::hash<std::string>{}(cs)); }
                         } catch (...) {}
                         f.key = std::to_string(std::hash<std::string>{}(f.stream));
                         it = formCache.emplace(ck, f).first;
                     }
                     d.key = it->second.key; d.textOnly = it->second.textOnly; d.contact = it->second.contact;
                     d.hasInnerAngle = it->second.hasInnerAngle; d.innerAngle = it->second.innerAngle; d.innerAlpha = it->second.innerAlpha; d.acrobat = it->second.acrobat;
+                    d.fillSign = it->second.fillSign; d.hasDecoded = it->second.hasDecoded; d.textSig = it->second.textSig;
                 } else if (sub.isName() && sub.getName() == "/Image") {
                     d.isImage = true;
                     pi.imgArea += std::fabs(g.ctm[0] * g.ctm[3] - g.ctm[1] * g.ctm[2]);
@@ -372,7 +689,37 @@ void detectArtifacts(Analysis& A) {
     int stampPages = 0, stampObjs = 0; std::set<int> stampPageSet;
     for (int pi = 0; pi < n; ++pi)
         for (auto& d : A.pages[pi].dos) if (d.isForm) { auto& g = groups[groupKey(d)]; g.recs.push_back(d); g.pages.insert(pi); }
+    // The same tilted, see-through text stamped at a different place on each page (a sheet that was cut into pages shows a
+    // different part of the stamp on every page): clustered by the text it shows, not by where it sits.
+    std::map<std::string, std::vector<std::string>> cluster;   // textSig -> group keys
     for (auto& [k, g] : groups) {
+        const DoRec& d = g.recs[0];
+        if (d.textSig.empty() || !d.textOnly) continue;
+        const double tilt = d.hasInnerAngle ? d.innerAngle + angleOf(d.m) : angleOf(d.m);
+        if (axisAligned(tilt) || std::min(d.alpha, d.innerAlpha) > 0.5) continue;
+        cluster[d.textSig].push_back(k);
+    }
+    std::set<std::string> clustered;
+    for (auto& [sig, keys] : cluster) {
+        std::set<int> pages; int objs = 0;
+        for (auto& k : keys) { pages.insert(groups[k].pages.begin(), groups[k].pages.end()); objs += (int)groups[k].recs.size(); }
+        if (pages.size() < 2 || (double)pages.size() < 0.25 * n) continue;
+        const DoRec& d = groups[keys[0]].recs[0];
+        const double tilt = d.hasInnerAngle ? d.innerAngle + angleOf(d.m) : angleOf(d.m);
+        const double alpha = std::min(d.alpha, d.innerAlpha);
+        int score = 0; Finding f; f.kind = Kind::ArtifactObject; f.formKey = keys[0];
+        for (size_t i = 1; i < keys.size(); ++i) f.extraKeys.push_back(keys[i]);
+        score += 25; f.evidence.push_back("倾斜 " + std::to_string((int)std::lround(tilt)) + "° +25");
+        score += 20; f.evidence.push_back("半透明（不透明度 " + std::to_string((int)std::lround(alpha * 100)) + "%） +20");
+        score += 20; f.evidence.push_back("同一段文字在 " + std::to_string(pages.size()) + "/" + std::to_string(n) + " 页重复出现（位置随分页变化） +20");
+        score += 10; f.evidence.push_back("只含文字 +10");
+        if (d.acrobat || d.contact) { score += 10; f.evidence.push_back(d.contact ? "文字像联系方式 +10" : "带编辑软件的背景/水印记号 +10"); }
+        f.score = std::min(score, 100); f.tier = tierFor(f.score); f.pages = (int)pages.size(); f.objects = objs; f.contactText = d.contact;
+        f.label = d.contact ? "叠加文字（含联系方式文字）" : "叠加文字对象";
+        if (f.tier != Tier::Keep) { A.rep.findings.push_back(f); for (auto& k : keys) clustered.insert(k); }
+    }
+    for (auto& [k, g] : groups) {
+        if (clustered.count(k)) continue;
         const DoRec& d = g.recs[0];
         bool allArt = true; for (auto& r : g.recs) if (!r.inArtifact) allArt = false;
         bool ksp = d.name.rfind("/KSPX", 0) == 0;
@@ -383,6 +730,11 @@ void detectArtifacts(Analysis& A) {
         const bool innerOk = d.acrobat || (n >= 3 && (int)g.pages.size() >= 0.6 * n);
         if (innerOk && axisAligned(ang) && d.hasInnerAngle) ang += d.innerAngle;
         const double alpha = innerOk ? std::min(d.alpha, d.innerAlpha) : d.alpha;
+        if (d.fillSign) {
+            // text typed afterwards with Acrobat's "Fill & Sign": not part of the pattern
+            score += 60; f.evidence.push_back("Acrobat「填写和签名」后添加的文字（嵌套表单，带 ADBE_FillSign 标记） +60");
+            if (d.contact) { score += 25; f.evidence.push_back("文字像联系方式/账号 +25"); }
+        }
         if (!axisAligned(ang)) { score += 25; f.evidence.push_back("倾斜 " + std::to_string((int)std::lround(ang)) + "° +25"); }
         if (alpha <= 0.5) { score += 20; f.evidence.push_back("半透明（不透明度 " + std::to_string((int)std::lround(alpha * 100)) + "%） +20"); }
         else if (alpha < 0.95) { score += 10; f.evidence.push_back("略透明 +10"); }
@@ -397,7 +749,7 @@ void detectArtifacts(Analysis& A) {
             if (d.textOnly || ksp) { stampObjs += (int)g.recs.size(); for (int p : g.pages) stampPageSet.insert(p); }
             continue;
         }
-        f.label = d.contact ? "叠加文字（含联系方式文字）" : "叠加文字对象";
+        f.label = d.fillSign ? "Acrobat 填写签名文字（后添加）" : d.contact ? "叠加文字（含联系方式文字）" : "叠加文字对象";
         A.rep.findings.push_back(f);
     }
     if (stampObjs > 0) {
@@ -433,14 +785,15 @@ struct Ev {
     bool stroke = false, whiteFill = false, clipped = false;
     std::string str;                 // Text: shown bytes
     double x = 0, y = 0, size = 0;   // Text: origin
+    double angle = 0;                // Text: baseline direction in degrees
     std::string name;                // Do: resource name
     std::vector<std::pair<double, double>> pts;   // Paint: path points in page space (control points included)
 };
 bool fillOnlyForm(QPDFObjectHandle x) {
     try {
-        Collect cb; x.parseAsContents(&cb);
+        auto fins = parseForm(x);
         bool fill = false;
-        for (auto& i : cb.out) {
+        for (auto& i : fins) {
             const std::string& o = i.op;
             if (o == "f" || o == "F" || o == "f*") fill = true;
             else if (o == "S" || o == "s" || o == "B" || o == "B*" || o == "b" || o == "b*" || o == "Tj" || o == "TJ" || o == "Do" || o == "BI" || o == "sh" || o == "'" || o == "\"") return false;
@@ -448,7 +801,7 @@ bool fillOnlyForm(QPDFObjectHandle x) {
         return fill;
     } catch (...) { return false; }
 }
-std::vector<Ev> traceEvents(QPDFPageObjectHelper& page, std::vector<Instr>& ins, std::map<std::string, bool>& fillFormCache) {
+std::vector<Ev> traceEvents(QPDFPageObjectHelper& page, std::vector<Instr>& ins, std::map<std::string, bool>& fillFormCache, bool keepPts = true) {
     std::vector<Ev> evs;
     QPDFObjectHandle res = page.getObjectHandle().getKey("/Resources");
     QPDFObjectHandle xo = res.isDictionary() ? res.getKey("/XObject") : QPDFObjectHandle::newNull();
@@ -456,12 +809,12 @@ std::vector<Ev> traceEvents(QPDFPageObjectHelper& page, std::vector<Instr>& ins,
     Mat tm{1, 0, 0, 1, 0, 0}, tlm{1, 0, 0, 1, 0, 0}; double fsize = 1, leading = 0;
     Box path; size_t pathFirst = SIZE_MAX; bool pathClip = false;
     std::vector<std::pair<double, double>> curPts;
-    auto pt = [&](double x, double y) { const double X = x * g.ctm[0] + y * g.ctm[2] + g.ctm[4], Y = x * g.ctm[1] + y * g.ctm[3] + g.ctm[5]; path.add(X, Y); curPts.emplace_back(X, Y); };
+    auto pt = [&](double x, double y) { const double X = x * g.ctm[0] + y * g.ctm[2] + g.ctm[4], Y = x * g.ctm[1] + y * g.ctm[3] + g.ctm[5]; path.add(X, Y); if (keepPts) curPts.emplace_back(X, Y); };
     auto num = [](Instr& i, size_t k) { return k < i.a.size() && i.a[k].isNumber() ? i.a[k].getNumericValue() : 0.0; };
     auto showText = [&](size_t idx, Instr& i) {
         Ev e; e.type = Ev::Text; e.first = e.last = idx;
         Mat m = mul(tm, g.ctm);
-        e.x = m[4]; e.y = m[5]; e.size = fsize * std::hypot(m[0], m[1]);
+        e.x = m[4]; e.y = m[5]; e.size = fsize * std::hypot(m[0], m[1]); e.angle = std::atan2(m[1], m[0]) * 180 / kPi;
         for (auto& o : i.a) {
             if (o.isString()) e.str += o.getStringValue();
             else if (o.isArray()) for (int k = 0; k < o.getArrayNItems(); ++k) { auto t = o.getArrayItem(k); if (t.isString()) e.str += t.getStringValue(); }
@@ -533,7 +886,7 @@ void detectBlocks(Analysis& A) {
     if (n < 1) return;
     std::vector<std::vector<Ev>> E(n);
     std::map<std::string, bool> ffc;
-    for (int p = 0; p < n; ++p) E[p] = traceEvents(A.pageObjs[p], A.ins[p], ffc);
+    for (int p = 0; p < n; ++p) E[p] = traceEvents(A.pageObjs[p], A.ins[p], ffc, false);
     // contact-like strings and how many pages carry them
     std::map<std::string, std::set<int>> seedPages, staticPages;
     struct Seen { int page; double x, y; };
@@ -557,7 +910,8 @@ void detectBlocks(Analysis& A) {
     if (seedStr.empty()) return;
 
     A.bKill.assign(n, {}); A.bNames.assign(n, {});
-    int pagesHit = 0, items = 0, onBlock = 0, sameSpot = 0, statics = 0, seedsAll = 0, pagesWithSeed = 0;
+    int pagesHit = 0, items = 0, onBlock = 0, sameSpot = 0, statics = 0, seedsAll = 0, pagesWithSeed = 0, tilted = 0, maxPerPage = 0;
+    double tiltDeg = 0;
     double areaFrac = 0;
     for (int p = 0; p < n; ++p) {
         auto& ev = E[p];
@@ -565,6 +919,8 @@ void detectBlocks(Analysis& A) {
         for (size_t k = 0; k < ev.size(); ++k) if (ev[k].type == Ev::Text && seedStr.count(ev[k].str)) seeds.push_back(k);
         if (seeds.empty()) continue;
         ++pagesWithSeed;
+        maxPerPage = std::max(maxPerPage, (int)seeds.size());
+        for (size_t sk : seeds) if (!axisAligned(ev[sk].angle)) { ++tilted; tiltDeg = ev[sk].angle; }
         // one region per seed: the seed text plus the coloured block(s) that surround it
         std::vector<Box> regions; std::set<size_t> containers;
         const double pageArea = A.pages[p].pageArea;
@@ -620,6 +976,9 @@ void detectBlocks(Analysis& A) {
     else { score += 25; f.evidence.push_back("联系方式类文字在 " + std::to_string(seedPg) + "/" + std::to_string(n) + " 页重复出现 +25"); }
     if (sameSpot >= 0.8 * seedsAll && seedsAll > 0) { score += 15; f.evidence.push_back("文字每页都在同一位置 +15"); }
     if (onBlock >= 0.8 * pagesWithSeed) { score += 15; f.evidence.push_back("文字压在一块有底色的矩形上（信息栏） +15"); }
+    // a sheet-wide tiled stamp: the same contact text written over and over, at an angle
+    int seedEvents = 0; for (int p = 0; p < n; ++p) for (auto& e : E[p]) if (e.type == Ev::Text && seedStr.count(e.str)) ++seedEvents;
+    if (maxPerPage >= 3 && seedEvents > 0 && tilted >= 0.6 * seedEvents) { score += 30; f.evidence.push_back("倾斜 " + std::to_string((int)std::lround(tiltDeg)) + "° 的文字在每页平铺重复（每页最多 " + std::to_string(maxPerPage) + " 处） +30"); }
     if (areaFrac <= 0.1) { score += 10; f.evidence.push_back("占页面面积不超过 10% +10"); }
     if (statics > 0) { score += 10; f.evidence.push_back("同一块内还有每页相同的品牌字/图标（页码等逐页变化的文字不动） +10"); }
     f.score = score; f.tier = tierFor(score);
@@ -698,7 +1057,7 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
         auto& f = A.rep.findings[i];
         if (f.tier == Tier::Unsupported) continue;
         if (f.tier != Tier::High && !pick.count(i)) continue;
-        if (f.kind == Kind::ArtifactObject) dropForms.insert(f.formKey);
+        if (f.kind == Kind::ArtifactObject) { dropForms.insert(f.formKey); for (auto& k : f.extraKeys) dropForms.insert(k); }
         if (f.kind == Kind::FlatText) flat = &f;
         if (f.kind == Kind::LayerBlock) dropBlock = true;
     }
@@ -793,7 +1152,7 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                         if (numeric(i, c)) {
                             auto it = flat->restore.find(ckey(c));
                             if (it != flat->restore.end() && it->second.size() == c.size()) {
-                                for (size_t j = 0; j < c.size(); ++j) i.a[j] = QPDFObjectHandle::newReal(it->second[j], 3);
+                                for (size_t j = 0; j < c.size(); ++j) i.a[j] = Arg::real(it->second[j], 3);
                                 c = it->second; ++R.coloursRestored;
                             }
                             g.fill = c;
@@ -1080,89 +1439,6 @@ ShapeResult removeShapeTemplate(const std::filesystem::path& in, const std::file
 
 // ---- real text ----
 namespace {
-struct FontMap { int width = 1; bool has = false; std::map<unsigned, std::u16string> m; };
-std::string u16ToU8(const std::u16string& s) {
-    std::string o;
-    for (size_t i = 0; i < s.size(); ++i) {
-        unsigned c = s[i];
-        if (c >= 0xD800 && c < 0xDC00 && i + 1 < s.size()) { c = 0x10000 + ((c - 0xD800) << 10) + (s[i + 1] - 0xDC00); ++i; }
-        if (c < 0x80) o += (char)c;
-        else if (c < 0x800) { o += (char)(0xC0 | (c >> 6)); o += (char)(0x80 | (c & 63)); }
-        else if (c < 0x10000) { o += (char)(0xE0 | (c >> 12)); o += (char)(0x80 | ((c >> 6) & 63)); o += (char)(0x80 | (c & 63)); }
-        else { o += (char)(0xF0 | (c >> 18)); o += (char)(0x80 | ((c >> 12) & 63)); o += (char)(0x80 | ((c >> 6) & 63)); o += (char)(0x80 | (c & 63)); }
-    }
-    return o;
-}
-std::vector<std::string> hexTokens(const std::string& s) {   // every <...> group, as raw hex digits
-    std::vector<std::string> t;
-    for (size_t i = 0; i < s.size(); ++i) if (s[i] == '<' && (i + 1 >= s.size() || s[i + 1] != '<')) {
-        size_t j = s.find('>', i);
-        if (j == std::string::npos) break;
-        std::string h; for (size_t k = i + 1; k < j; ++k) if (std::isxdigit((unsigned char)s[k])) h += s[k];
-        t.push_back(h); i = j;
-    }
-    return t;
-}
-unsigned hexVal(const std::string& h) { return (unsigned)std::strtoul(h.c_str(), nullptr, 16); }
-std::u16string hexU16(const std::string& h) { std::u16string u; for (size_t i = 0; i + 3 < h.size() + 0; i += 4) u += (char16_t)hexVal(h.substr(i, 4)); if (h.size() == 2) u += (char16_t)hexVal(h); return u; }
-FontMap loadFont(QPDFObjectHandle f) {
-    FontMap fm;
-    if (!f.isDictionary()) return fm;
-    auto st = f.getKey("/Subtype");
-    if (st.isName() && st.getName() == "/Type0") fm.width = 2;
-    auto tu = f.getKey("/ToUnicode");
-    if (!tu.isStream()) return fm;
-    try {
-        auto buf = tu.getStreamData(qpdf_dl_generalized);
-        std::string d((const char*)buf->getBuffer(), buf->getSize());
-        size_t cs = d.find("begincodespacerange");
-        if (cs != std::string::npos) { auto t = hexTokens(d.substr(cs, d.find("endcodespacerange", cs) - cs)); if (!t.empty()) fm.width = std::max<int>(1, (int)t[0].size() / 2); }
-        size_t pos = 0;
-        while ((pos = d.find("beginbfchar", pos)) != std::string::npos) {
-            size_t e = d.find("endbfchar", pos); auto t = hexTokens(d.substr(pos, e - pos));
-            for (size_t i = 0; i + 1 < t.size(); i += 2) fm.m[hexVal(t[i])] = hexU16(t[i + 1]);
-            pos = e;
-        }
-        pos = 0;
-        while ((pos = d.find("beginbfrange", pos)) != std::string::npos) {
-            size_t e = d.find("endbfrange", pos); std::string blk = d.substr(pos, e - pos);
-            // <lo> <hi> <dst>  or  <lo> <hi> [<d1> <d2> ...]
-            size_t q = 0;
-            while (q < blk.size()) {
-                size_t a = blk.find('<', q); if (a == std::string::npos) break;
-                size_t a2 = blk.find('>', a), b = blk.find('<', a2), b2 = blk.find('>', b);
-                if (b == std::string::npos) break;
-                size_t c = blk.find_first_not_of(" \r\n\t", b2 + 1);
-                std::string lo, hi; for (size_t k = a + 1; k < a2; ++k) lo += blk[k]; for (size_t k = b + 1; k < b2; ++k) hi += blk[k];
-                if (c != std::string::npos && blk[c] == '[') {
-                    size_t endArr = blk.find(']', c); auto t = hexTokens(blk.substr(c, endArr - c));
-                    for (size_t i = 0; i < t.size(); ++i) fm.m[hexVal(lo) + (unsigned)i] = hexU16(t[i]);
-                    q = endArr + 1;
-                } else if (c != std::string::npos && blk[c] == '<') {
-                    size_t c2 = blk.find('>', c); std::string dst; for (size_t k = c + 1; k < c2; ++k) dst += blk[k];
-                    std::u16string base = hexU16(dst);
-                    for (unsigned code = hexVal(lo); code <= hexVal(hi) && code - hexVal(lo) < 65536; ++code) { std::u16string u = base; if (!u.empty()) u.back() = (char16_t)(u.back() + (code - hexVal(lo))); fm.m[code] = u; }
-                    q = c2 + 1;
-                } else break;
-            }
-            pos = e;
-        }
-        fm.has = !fm.m.empty();
-    } catch (...) {}
-    return fm;
-}
-std::string decodeShown(const std::string& raw, const FontMap& fm) {
-    std::u16string u;
-    const int w = fm.has ? fm.width : 1;
-    for (size_t i = 0; i + w <= raw.size(); i += w) {
-        unsigned code = 0; for (int k = 0; k < w; ++k) code = (code << 8) | (unsigned char)raw[i + k];
-        auto it = fm.m.find(code);
-        if (it != fm.m.end()) u += it->second;
-        else if (!fm.has && code < 128) u += (char16_t)code;
-        else if (!fm.has) u += (char16_t)code;   // Latin-1 fallback
-    }
-    return u16ToU8(u);
-}
 struct ShownText { size_t idx; std::string text; };
 std::vector<ShownText> shownTexts(QPDFPageObjectHelper& page, std::vector<Instr>& ins) {
     std::vector<ShownText> out;
@@ -1560,10 +1836,10 @@ struct Painter {
                     if (mt.isArray() && mt.getArrayNItems() == 6) for (int q = 0; q < 6; ++q) fm[q] = mt.getArrayItem(q).getNumericValue();
                     h.ctm = mul(fm, g.ctm);
                     try {
-                        Collect cb; x.parseAsContents(&cb);
+                        auto fins = parseForm(x);
                         auto fres = x.getDict().getKey("/Resources");
                         ++depth;
-                        run(cb.out, fres.isDictionary() ? fres : res, h);
+                        run(fins, fres.isDictionary() ? fres : res, h);
                         --depth;
                     } catch (...) { }
                 }

@@ -35,6 +35,7 @@ struct Finding {
     std::vector<std::string> evidence;   // "reason +points" lines, UTF-8
     // internal plan data
     std::string formKey;           // ArtifactObject: group key
+    std::vector<std::string> extraKeys;   // ArtifactObject: further keys of the same stamp (placed differently on other pages)
     double alpha = 0;              // FlatText: fitted mixing ratio
     std::vector<double> lightColour;                       // FlatText: colour of the watermark glyphs over white
     std::map<std::string, std::vector<double>> restore;    // FlatText: blended colour key -> original colour

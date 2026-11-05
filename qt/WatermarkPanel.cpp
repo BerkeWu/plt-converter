@@ -26,6 +26,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QThread>
 #include <QThreadPool>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -92,6 +93,11 @@ void clearLayout(QLayout* l) {
 
 WatermarkPanel::WatermarkPanel(QWidget* parent) : QWidget(parent) {
     previewPool_.setMaxThreadCount(1);
+    // analysis / removal never gets more than half of the cores (and at most 3), at low priority:
+    // 20 files dropped in at once must not turn every core on and spin the fans up
+    workPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 3));
+    workPool_.setThreadPriority(QThread::LowPriority);
+    previewPool_.setThreadPriority(QThread::LowPriority);
     setAcceptDrops(true);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -109,6 +115,9 @@ WatermarkPanel::WatermarkPanel(QWidget* parent) : QWidget(parent) {
 
 WatermarkPanel::~WatermarkPanel() {
     cancel_ = true;
+    ++previewGen_;
+    workPool_.waitForDone(20000);
+    previewPool_.waitForDone(20000);
     QThreadPool::globalInstance()->waitForDone(20000);
 }
 
@@ -473,7 +482,7 @@ void WatermarkPanel::async(std::function<void()> work, std::function<void()> don
         if (done) done();
         w->deleteLater();
     });
-    w->setFuture(pool ? QtConcurrent::run(pool, std::move(work)) : QtConcurrent::run(std::move(work)));
+    w->setFuture(QtConcurrent::run(pool ? pool : &workPool_, std::move(work)));
 }
 
 QString WatermarkPanel::letter(int g) const {
