@@ -34,7 +34,8 @@ Source: "{#DeployDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion 
 [Icons]
 Name: "{autoprograms}\PLT 排版转换器"; Filename: "{app}\plt_gui.exe"
 Name: "{autodesktop}\PLT 排版转换器"; Filename: "{app}\plt_gui.exe"; Tasks: desktopicon
-Name: "{autoprograms}\去水印（把PDF拖到这里）"; Filename: "{app}\watermark_drop.bat"; Comment: "实验功能：把带水印的纸样 PDF 拖到这里"
+Name: "{autoprograms}\去水印（批量，最多20个）"; Filename: "{app}\plt_gui.exe"; Parameters: "--watermark"; Comment: "去水印 / 去除指定文字，可一次处理最多 20 个同类文件"
+Name: "{autoprograms}\去水印（命令行，把PDF拖到这里）"; Filename: "{app}\watermark_drop.bat"; Comment: "实验功能：把带水印的纸样 PDF 拖到这里"
 
 [Run]
 Filename: "{app}\plt_gui.exe"; Description: "运行 PLT 排版转换器"; Flags: nowait postinstall skipifsilent

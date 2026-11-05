@@ -217,7 +217,9 @@ MainWindow::MainWindow() {
     main->addWidget(buildBatchRightHost());
     root->addLayout(main, 1);
     root->addWidget(buildBatchBottomBar());
-    setCentralWidget(central);
+    rootStack_ = new QStackedWidget;
+    rootStack_->addWidget(central);
+    setCentralWidget(rootStack_);
     applyStyle();
     batchChrome();
 
@@ -286,6 +288,12 @@ QWidget* MainWindow::buildTopBar() {
     connect(bu_.modeBatch, &QPushButton::clicked, this, [this] { setBatchMode(true); });
     ml->addWidget(bu_.modeSingle);
     ml->addWidget(bu_.modeBatch);
+#ifdef PLT_WITH_WM
+    modeWm_ = new QPushButton(tr("水印处理"));
+    modeWm_->setToolTip(tr("去除 / 批量去除 PDF 纸样上的水印"));
+    connect(modeWm_, &QPushButton::clicked, this, [this] { showWatermark(true); });
+    ml->addWidget(modeWm_);
+#endif
     l->addWidget(mode);
     return top;
 }
@@ -1466,3 +1474,26 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     saveSettings();
     QMainWindow::closeEvent(e);
 }
+
+// ============================================================================ watermark mode
+
+#ifdef PLT_WITH_WM
+#include "WatermarkPanel.h"
+WatermarkPanel* MainWindow::watermarkPanel() {
+    if (!wmPanel_) {
+        wmPanel_ = new WatermarkPanel;
+        rootStack_->addWidget(wmPanel_);
+        connect(wmPanel_, &WatermarkPanel::leaveRequested, this, [this](bool batch) { showWatermark(false); setBatchMode(batch); });
+    }
+    return wmPanel_;
+}
+void MainWindow::showWatermark(bool on) {
+    if (on) rootStack_->setCurrentWidget(watermarkPanel());
+    else rootStack_->setCurrentIndex(0);
+}
+bool MainWindow::watermarkVisible() const { return wmPanel_ && rootStack_->currentWidget() == wmPanel_; }
+#else
+WatermarkPanel* MainWindow::watermarkPanel() { return nullptr; }
+void MainWindow::showWatermark(bool) {}
+bool MainWindow::watermarkVisible() const { return false; }
+#endif

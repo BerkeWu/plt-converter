@@ -37,6 +37,7 @@ class QRadioButton;
 class Swatch;
 class QHBoxLayout;
 class ToggleSwitch;
+class WatermarkPanel;
 
 struct PageMeta {
     int row = -1, col = -1;
@@ -135,6 +136,10 @@ public:
 
     // ---- batch conversion (PRD module 5) ----
     void setBatchMode(bool on);
+    // ---- watermark removal (needs the QPDF-based core; see CMake option PLT_WITH_WM) ----
+    void showWatermark(bool on);
+    bool watermarkVisible() const;
+    WatermarkPanel* watermarkPanel();
     bool batchMode() const { return batch_; }
     void goBatchStep(int step);                          // 0 添加文件, 1 通用参数, 2 自动排版, 3 逐一预览, 4 批量导出
     void addBatchFiles(const QStringList& paths);        // files and/or folders
@@ -165,6 +170,9 @@ protected:
     void closeEvent(QCloseEvent*) override;
 
 private:
+    QStackedWidget* rootStack_ = nullptr;
+    WatermarkPanel* wmPanel_ = nullptr;
+    QPushButton* modeWm_ = nullptr;
     // construction
     QWidget* buildTopBar();
     QWidget* buildImportPanel();

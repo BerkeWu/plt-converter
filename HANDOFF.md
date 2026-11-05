@@ -171,3 +171,12 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - `wm::listText/removeText`：解析 ToUnicode（bfchar/bfrange、codespace 宽度），Type0 默认 2 字节，无 ToUnicode 时按 Latin-1。去除 = 删掉含目标子串的 Tj/TJ。对线条字给出明确报错（提示改用框选）。
 - 验证：f57c0ada 框选第 2 页「小红叶」13 笔 → 共去除 106 笔，涉及第 1–8 页（不同字号、180° 旋转、被页边切断的都命中），第 9–10 页本无此字；被去除线条最大 41pt，纸样轮廓线未动；「501」「面料A」保留。
 - 待做：GUI（水印页里加「去除文字」：输入框 + 文字列表勾选 + 画布框选）；把框选的笔画组存成命名模板（如「小红叶」），以后输入名称即可跨文件去除；整字级匹配（只删「小红叶」不动单独出现的「叶」）目前靠整组校验，页边切断的情形只要求 25% 笔画命中。
+
+
+## 第十三轮：水印处理界面 + 批量去水印（设计稿 6–11，用户确认：批量上限 20 个、阈值 75、其余按稿）
+- 设计稿（Design artifact「去水印功能设计稿」）新增画板：6 去除指定文字（按内容）、7 框选图形（线条字）、8 批量添加文件并自动分组、9 配方设置与试跑、10 运行与报告、11 差异/校验失败/自动套用弹窗。
+- 核心（core/wm）：`ShapeTemplate`、`extractShape`、`removeShapeTemplate`（`removeShape` 重构为 `shapeImpl`，模板作为「虚拟页」参与匹配）；`Recipe`、`signatureOf`、`conformity`、`groupReports`、`saveRecipe/loadRecipe`、`countStrokes`、`applyRecipe`（检测→指定文字→各图形模板，逐步写临时文件，最后按「线条数 = 原有 − 图形模板去除数」校验）；`drawPage`（矢量预览，递归进 Form，贝塞尔取 8 点折线，位图只画虚线框，无 ToUnicode 的双字节旧字体不画字）。
+- CLI：`pdfwm group`、`make-recipe`、`batch --recipe --out`。
+- Qt：`qt/WatermarkPanel`（三步）、`qt/DrawView`（预览 + 橡皮筋框选，原图/去除后的差异用「图元几何键」多重集合比较，不需要逐项目关联）。MainWindow 用 QStackedWidget 包了一层，顶栏第三个模式按钮；`plt_gui --watermark [文件…]` 直接进入。
+- 测试：`test_wm`（分组、配方存取、吻合度、校验、模板）、`test_wmgui`（20 个上限、完整流程含框选图形与文字、不覆盖原件、嵌入主窗口）。ctest 5/5。
+- 取舍/限制：①「需确认」项只能在单文件（组内只有 1 个文件）时勾选并一并去除，批量只自动去除「默认去除」项；②配方里的指定文字对同组文件按子串匹配，图形模板按形状匹配，二者不依赖检测；③预览不是位图渲染：不画图片内容、渐变/图案、剪裁路径，页面旋转（/Rotate）未处理，无 ToUnicode 的 GBK 字体文字显示为空；④批量按顺序单线程处理，20 个文件取决于页数；⑤Windows 打包/QPDF 12 未实机验证；⑥吻合度是启发式（均分 − 30×缺失 − 8×多余）。

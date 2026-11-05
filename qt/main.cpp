@@ -5,6 +5,9 @@
 #include <iostream>
 
 #include "MainWindow.h"
+#ifdef PLT_WITH_WM
+#include "WatermarkPanel.h"
+#endif
 
 // Headless self-check used in the dev sandbox: plt_gui --demo file.plt outdir
 // (QT_QPA_PLATFORM=offscreen): imports, screenshots all three steps, exercises edits, exports a PDF.
@@ -79,6 +82,18 @@ int main(int argc, char** argv) {
     const int di = args.indexOf("--demo");
     if (di >= 0 && args.size() > di + 2) {
         runDemo(w, args[di + 1], args[di + 2]);
+    } else if (args.contains("--watermark")) {
+        // 水印处理 mode; remaining arguments are PDF files / folders to add right away
+        QStringList files = args.mid(1);
+        files.removeAll("--watermark");
+        QTimer::singleShot(0, [&w, files] {
+            #ifdef PLT_WITH_WM
+            w.showWatermark(true);
+            if (auto* p = w.watermarkPanel()) { if (!files.isEmpty()) p->addFiles(files); }
+#else
+            Q_UNUSED(files);
+#endif
+        });
     } else if (args.size() > 1 && args[1].endsWith(".plt", Qt::CaseInsensitive)) {
         QTimer::singleShot(0, [&w, f = args[1]] { w.loadFile(f); });
     }

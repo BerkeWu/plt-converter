@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <functional>
 #include <set>
 #include <sstream>
@@ -902,7 +903,10 @@ void writePages(QPDF& pdf, std::vector<QPDFPageObjectHelper>& pages, std::vector
 }
 }  // namespace
 
-ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::path& out, int page, const Rect& sel, bool everywhere) {
+namespace {
+// One implementation for three entry points: box on a page (+ copies), extract a template only, apply a stored template.
+ShapeResult shapeImpl(const std::filesystem::path& in, const std::filesystem::path& out, int page, const Rect& sel, bool everywhere,
+                      const ShapeTemplate* tpl, ShapeTemplate* extractOut) {
     ShapeResult R;
     QPDF pdf;
     std::string err;
@@ -912,7 +916,7 @@ ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::
         doc.pushInheritedAttributesToPage();
         auto pages = doc.getAllPages();
         const int n = (int)pages.size();
-        if (page < 1 || page > n) { R.error = "页码超出范围"; return R; }
+        if (!tpl && (page < 1 || page > n)) { R.error = "页码超出范围"; return R; }
         std::vector<std::vector<Instr>> ins; std::vector<std::vector<Ev>> E; std::vector<std::vector<bool>> kill;
         std::map<std::string, bool> ffc;
         for (auto& p : pages) {
@@ -923,17 +927,37 @@ ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::
             E.push_back(std::move(strokes));
             kill.emplace_back(ins.back().size(), false);
         }
-        // selection rectangle -> PDF space of that page
-        PageGeom g = geomOf(pages[page - 1]);
-        Box sb;
-        sb.add(g.llx + sel.x0, g.lly + g.h - sel.y0); sb.add(g.llx + sel.x1, g.lly + g.h - sel.y1);
-        std::vector<int> S;   // indices of strokes in the selection
-        for (int k = 0; k < (int)E[page - 1].size(); ++k) {
-            const Box& b = E[page - 1][k].box;
-            if (b.x0 >= sb.x0 - 0.3 && b.x1 <= sb.x1 + 0.3 && b.y0 >= sb.y0 - 0.3 && b.y1 <= sb.y1 + 0.3) S.push_back(k);
+        std::vector<int> S;   // indices of strokes in the selection (or of the template, stored as a virtual page after the real ones)
+        if (tpl) {
+            std::vector<Ev> vs;
+            for (auto& st : tpl->strokes) {
+                if (st.size() < 2) continue;
+                Ev e; e.type = Ev::Paint; e.stroke = true; e.pts = st;
+                for (auto& q : st) e.box.add(q.first, q.second);
+                vs.push_back(std::move(e));
+            }
+            if (vs.empty()) { R.error = "图形模板是空的"; return R; }
+            for (int k = 0; k < (int)vs.size(); ++k) S.push_back(k);
+            E.push_back(std::move(vs));
+            page = n + 1;   // the virtual page
+        } else {
+            // selection rectangle -> PDF space of that page
+            PageGeom g = geomOf(pages[page - 1]);
+            Box sb;
+            sb.add(g.llx + sel.x0, g.lly + g.h - sel.y0); sb.add(g.llx + sel.x1, g.lly + g.h - sel.y1);
+            for (int k = 0; k < (int)E[page - 1].size(); ++k) {
+                const Box& b = E[page - 1][k].box;
+                if (b.x0 >= sb.x0 - 0.3 && b.x1 <= sb.x1 + 0.3 && b.y0 >= sb.y0 - 0.3 && b.y1 <= sb.y1 + 0.3) S.push_back(k);
+            }
         }
         if (S.empty()) { R.error = "选框内没有完整的线条（请把要去除的字符完整框住）"; return R; }
         R.selected = (int)S.size();
+        if (extractOut) {
+            extractOut->strokes.clear();
+            for (int k : S) extractOut->strokes.push_back(E[page - 1][k].pts);
+            R.ok = true;
+            return R;
+        }
         auto markStroke = [&](int pi, int k) {
             const Ev& e = E[pi][k];
             for (size_t t = e.first; t <= e.last; ++t) {
@@ -943,10 +967,10 @@ ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::
         };
         std::set<std::pair<int, int>> done;   // (page, stroke) already removed
         auto take = [&](int pi, int k) { if (done.insert({pi, k}).second) { markStroke(pi, k); ++R.removed; } };
-        for (int k : S) take(page - 1, k);
-        if (everywhere) {
+        if (!tpl) for (int k : S) take(page - 1, k);
+        if (everywhere || tpl) {
             const double tol = 0.35;   // the source coordinates sit on a 0.16 pt grid, so two copies of one glyph differ by up to ~0.12 pt
-            std::set<int> touched; touched.insert(page - 1);
+            std::set<int> touched; if (!tpl) touched.insert(page - 1);
             // anchors: the most detailed strokes of the selection (a copy cut by the page edge may lack some of them)
             std::vector<int> anchors = S;
             std::stable_sort(anchors.begin(), anchors.end(), [&](int x, int y) { return E[page - 1][x].pts.size() > E[page - 1][y].pts.size(); });
@@ -1036,10 +1060,22 @@ ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::
             }
             for (int pi : touched) R.pagesTouched.push_back(pi + 1);
         } else R.pagesTouched.push_back(page);
+        if (tpl && R.removed == 0) { R.error = "没有找到与图形模板相同的线条"; return R; }
         writePages(pdf, pages, ins, kill, out);
         R.ok = true;
     } catch (std::exception& e) { R.error = e.what(); }
     return R;
+}
+}  // namespace
+
+ShapeResult removeShape(const std::filesystem::path& in, const std::filesystem::path& out, int page, const Rect& sel, bool everywhere) {
+    return shapeImpl(in, out, page, sel, everywhere, nullptr, nullptr);
+}
+ShapeResult extractShape(const std::filesystem::path& in, int page, const Rect& sel, ShapeTemplate& tpl) {
+    return shapeImpl(in, {}, page, sel, false, nullptr, &tpl);
+}
+ShapeResult removeShapeTemplate(const std::filesystem::path& in, const std::filesystem::path& out, const ShapeTemplate& tpl) {
+    return shapeImpl(in, out, 0, Rect{}, true, &tpl, nullptr);
 }
 
 // ---- real text ----
@@ -1203,6 +1239,359 @@ TextResult removeText(const std::filesystem::path& in, const std::filesystem::pa
         }
         if (R.removed == 0) { R.error = "没有找到包含指定内容的文字（线条画出来的字不是文字，请改用框选）"; return R; }
         writePages(pdf, pages, ins, kill, out);
+        R.ok = true;
+    } catch (std::exception& e) { R.error = e.what(); }
+    return R;
+}
+
+
+// ============================================================================ batch / recipe
+
+namespace {
+std::string tokenOf(const Finding& f) {
+    static const char* k[] = {"独立叠加对象", "斜铺文字", "页眉页脚", "整页位图", "同层店铺信息栏"};
+    return std::string(k[(int)f.kind]) + (f.contactText ? "+联系方式" : "");
+}
+std::vector<std::string> highTokens(const Report& r) {
+    std::set<std::string> t;
+    for (auto& f : r.findings) if (f.tier == Tier::High) t.insert(tokenOf(f));
+    return {t.begin(), t.end()};
+}
+std::string joinTok(const std::vector<std::string>& v) {
+    std::string s;
+    for (auto& x : v) { if (!s.empty()) s += "|"; s += x; }
+    return s;
+}
+std::string trim(std::string s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
+    return s;
+}
+}  // namespace
+
+std::string signatureOf(const Report& r) { return joinTok(highTokens(r)); }
+
+int conformity(const Report& r, const Recipe& rc) {
+    if (!r.ok) return 0;
+    std::set<std::string> have;
+    for (auto& t : highTokens(r)) have.insert(t);
+    std::set<std::string> want;
+    { std::stringstream ss(rc.signature); std::string t; while (std::getline(ss, t, '|')) if (!t.empty()) want.insert(t); }
+    int missing = 0, extra = 0;
+    for (auto& w : want) if (!have.count(w)) ++missing;
+    for (auto& h : have) if (!want.count(h) && !want.empty()) ++extra;
+    for (auto& f : r.findings) if (f.tier == Tier::Confirm) ++extra;
+    double sum = 0; int n = 0;
+    for (auto& f : r.findings) if (f.tier == Tier::High) { sum += f.score; ++n; }
+    if (n == 0) return want.empty() ? 100 : 0;
+    int v = (int)std::lround(sum / n) - 30 * missing - 8 * extra;
+    return std::max(0, std::min(100, v));
+}
+
+std::vector<int> groupReports(const std::vector<Report>& reps, std::vector<std::string>* sigs) {
+    std::vector<int> g; std::map<std::string, int> idx;
+    if (sigs) sigs->clear();
+    for (auto& r : reps) {
+        if (!r.ok) { g.push_back(-3); continue; }
+        std::string s = signatureOf(r);
+        if (s.empty()) {
+            bool uns = false; for (auto& f : r.findings) if (f.tier == Tier::Unsupported) uns = true;
+            g.push_back(uns ? -2 : -1);
+            continue;
+        }
+        auto it = idx.find(s);
+        if (it == idx.end()) { it = idx.emplace(s, (int)idx.size()).first; if (sigs) sigs->push_back(s); }
+        g.push_back(it->second);
+    }
+    return g;
+}
+
+bool saveRecipe(const std::filesystem::path& file, const Recipe& r, std::string* error) {
+    std::ofstream o(file, std::ios::binary);
+    if (!o) { if (error) *error = "无法写入配方文件"; return false; }
+    o << "PLT-WM-RECIPE 1\n" << "name=" << r.name << "\n" << "signature=" << r.signature << "\n"
+      << "removeDetected=" << (r.removeDetected ? 1 : 0) << "\n" << "verify=" << (r.verify ? 1 : 0) << "\n";
+    for (auto& t : r.texts) o << "text=" << t << "\n";
+    for (auto& sh : r.shapes) {
+        o << "shape=" << sh.name << "\n";
+        for (auto& st : sh.strokes) {
+            o << "s=";
+            char b[64];
+            for (size_t i = 0; i < st.size(); ++i) { std::snprintf(b, sizeof b, "%s%.3f,%.3f", i ? ";" : "", st[i].first, st[i].second); o << b; }
+            o << "\n";
+        }
+        o << "end\n";
+    }
+    return true;
+}
+
+bool loadRecipe(const std::filesystem::path& file, Recipe& r, std::string* error) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) { if (error) *error = "无法读取配方文件"; return false; }
+    std::string line;
+    std::getline(in, line);
+    if (trim(line).rfind("PLT-WM-RECIPE", 0) != 0) { if (error) *error = "不是配方文件"; return false; }
+    r = Recipe();
+    ShapeTemplate* cur = nullptr;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line == "end") { cur = nullptr; continue; }
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        if (k == "name") r.name = v;
+        else if (k == "signature") r.signature = v;
+        else if (k == "removeDetected") r.removeDetected = v != "0";
+        else if (k == "verify") r.verify = v != "0";
+        else if (k == "text") { if (!v.empty()) r.texts.push_back(v); }
+        else if (k == "shape") { r.shapes.push_back(ShapeTemplate()); cur = &r.shapes.back(); cur->name = v; }
+        else if (k == "s" && cur) {
+            std::vector<std::pair<double, double>> st; std::stringstream ss(v); std::string pt;
+            while (std::getline(ss, pt, ';')) { double x, y; if (std::sscanf(pt.c_str(), "%lf,%lf", &x, &y) == 2) st.emplace_back(x, y); }
+            if (st.size() >= 2) cur->strokes.push_back(std::move(st));
+        }
+    }
+    return true;
+}
+
+long countStrokes(const std::filesystem::path& pdfPath) {
+    QPDF pdf; std::string err;
+    if (!load(pdf, pdfPath, err)) return -1;
+    try {
+        QPDFPageDocumentHelper doc(pdf);
+        doc.pushInheritedAttributesToPage();
+        long n = 0; std::map<std::string, bool> ffc;
+        for (auto& p : doc.getAllPages()) {
+            auto ins = parsePage(p);
+            for (auto& e : traceEvents(p, ins, ffc)) if (e.type == Ev::Paint && e.stroke) ++n;
+        }
+        return n;
+    } catch (...) { return -1; }
+}
+
+FileResult applyRecipe(const std::filesystem::path& in, const std::filesystem::path& out, const Recipe& rc, const std::vector<int>& alsoRemove) {
+    FileResult R;
+    if (in == out) { R.error = "输出不能覆盖原文件"; return R; }
+    namespace fs = std::filesystem;
+    std::vector<fs::path> tmps;
+    auto tmpName = [&](int k) { fs::path t = out; t += ".part" + std::to_string(k); tmps.push_back(t); return t; };
+    auto cleanup = [&] { std::error_code ec; for (auto& t : tmps) fs::remove(t, ec); };
+    fs::path cur = in;
+    R.strokesBefore = countStrokes(in);
+    if (R.strokesBefore < 0) { R.error = "无法读取文件"; return R; }
+    long shapeStrokes = 0;
+    int step = 0;
+    auto nextOut = [&](bool last) { return last ? out : tmpName(++step); };
+    int stages = (rc.removeDetected ? 1 : 0) + (rc.texts.empty() ? 0 : 1) + (int)rc.shapes.size();
+    if (stages == 0) { R.error = "配方里没有要去除的内容"; return R; }
+    int done = 0;
+    try {
+        if (rc.removeDetected) {
+            Report rep = analyze(cur);
+            if (rep.hasRemovable() || !alsoRemove.empty()) {
+                bool last = ++done == stages;
+                fs::path o = nextOut(last);
+                R.detected = remove(cur, o, alsoRemove);
+                if (!R.detected.ok) { R.error = R.detected.error; cleanup(); return R; }
+                cur = o;
+            } else ++done;
+        }
+        if (!rc.texts.empty()) {
+            bool last = ++done == stages;
+            fs::path o = nextOut(last);
+            auto t = removeText(cur, o, rc.texts);
+            if (t.ok) { R.textsRemoved = t.removed; cur = o; }
+            else if (last && cur != out) { std::error_code ec; fs::copy_file(cur, out, fs::copy_options::overwrite_existing, ec); cur = out; }   // nothing to remove here is fine
+        }
+        for (auto& sh : rc.shapes) {
+            bool last = ++done == stages;
+            fs::path o = nextOut(last);
+            auto s = removeShapeTemplate(cur, o, sh);
+            if (s.ok) { R.shapesRemoved += s.removed; shapeStrokes += s.removed; cur = o; }
+            else if (last && cur != out) { std::error_code ec; fs::copy_file(cur, out, fs::copy_options::overwrite_existing, ec); cur = out; }
+        }
+        if (cur != out) { std::error_code ec; fs::copy_file(cur, out, fs::copy_options::overwrite_existing, ec); }   // nothing needed removing
+        cleanup();
+        R.strokesAfter = countStrokes(out);
+        R.strokesExpected = R.strokesBefore - shapeStrokes;
+        R.verified = R.strokesAfter == R.strokesExpected;
+        if (R.removedTotal() == 0) { std::error_code ec; fs::remove(out, ec); R.error = "没有找到可去除的内容"; R.nothingToDo = true; return R; }
+        if (rc.verify && !R.verified) {
+            std::error_code ec; fs::remove(out, ec);
+            R.error = "校验未通过：纸样线条数量与预期不符（" + std::to_string(R.strokesAfter) + " ≠ " + std::to_string(R.strokesExpected) + "），未输出";
+            return R;
+        }
+        R.ok = true;
+    } catch (std::exception& e) { cleanup(); R.error = e.what(); }
+    return R;
+}
+
+
+// ============================================================================ vector preview
+
+namespace {
+struct Painter {
+    std::vector<DrawItem>* out;
+    double H = 0, ox = 0, oy = 0;     // page height and origin (to flip into top-left space)
+    int depth = 0;
+    struct St { Mat ctm{1, 0, 0, 1, 0, 0}; Colour fill{0}, stroke{0}; double lw = 1, fa = 1, sa = 1; };
+    static void rgbOf(const Colour& c, float& r, float& g, float& b) {
+        if (c.size() == 1) r = g = b = (float)c[0];
+        else if (c.size() == 3) { r = (float)c[0]; g = (float)c[1]; b = (float)c[2]; }
+        else if (c.size() == 4) { r = (float)((1 - c[0]) * (1 - c[3])); g = (float)((1 - c[1]) * (1 - c[3])); b = (float)((1 - c[2]) * (1 - c[3])); }
+        else r = g = b = 0;
+    }
+    std::pair<double, double> map(const Mat& m, double x, double y) const {
+        return {x * m[0] + y * m[2] + m[4] - ox, H - (x * m[1] + y * m[3] + m[5] - oy)};
+    }
+    void run(std::vector<Instr>& ins, QPDFObjectHandle res, St g) {
+        QPDFObjectHandle xo = res.isDictionary() ? res.getKey("/XObject") : QPDFObjectHandle::newNull();
+        QPDFObjectHandle fonts = res.isDictionary() ? res.getKey("/Font") : QPDFObjectHandle::newNull();
+        QPDFObjectHandle egs = res.isDictionary() ? res.getKey("/ExtGState") : QPDFObjectHandle::newNull();
+        std::map<std::string, FontMap> fcache; const FontMap* font = nullptr;
+        std::vector<St> stack;
+        Mat tm{1, 0, 0, 1, 0, 0}, tlm{1, 0, 0, 1, 0, 0}; double fsize = 1, leading = 0;
+        std::vector<std::vector<std::pair<double, double>>> subs;   // current path, sub-paths in page space
+        double cx = 0, cy = 0;
+        auto num = [](Instr& i, size_t k) { return k < i.a.size() && i.a[k].isNumber() ? i.a[k].getNumericValue() : 0.0; };
+        auto add = [&](DrawItem::Kind k, const std::vector<std::pair<double, double>>& pts, const Colour& c, double a) {
+            DrawItem d; d.kind = k; d.pts = pts; rgbOf(c, d.r, d.g, d.b); d.a = (float)a; d.lineWidth = std::max(0.05, g.lw * std::hypot(g.ctm[0], g.ctm[1]));
+            out->push_back(std::move(d));
+        };
+        auto paint = [&](bool fill, bool stroke) {
+            for (auto& sp : subs) {
+                if (sp.size() < 2) continue;
+                if (fill) add(DrawItem::Fill, sp, g.fill, g.fa);
+                if (stroke) add(DrawItem::Stroke, sp, g.stroke, g.sa);
+            }
+            subs.clear();
+        };
+        auto showText = [&](Instr& i) {
+            std::string raw;
+            for (auto& o : i.a) {
+                if (o.isString()) raw += o.getStringValue();
+                else if (o.isArray()) for (int q = 0; q < o.getArrayNItems(); ++q) { auto e = o.getArrayItem(q); if (e.isString()) raw += e.getStringValue(); }
+            }
+            if (raw.empty()) return;
+            Mat m = mul(tm, g.ctm);
+            DrawItem d; d.kind = DrawItem::Text;
+            d.pts.push_back(map(m, 0, 0));
+            d.size = fsize * std::hypot(m[0], m[1]);
+            d.angle = std::atan2(m[1], m[0]);
+            if (font) d.text = decodeShown(raw, *font);
+            if (font && !font->has) for (unsigned char ch : raw) if (ch >= 128) { d.text.clear(); break; }   // legacy double-byte fonts without ToUnicode: not decodable here
+            d.glyphs = font && font->has ? (int)raw.size() / std::max(1, font->width) : (int)raw.size();
+            rgbOf(g.fill, d.r, d.g, d.b); d.a = (float)g.fa;
+            const double adv = d.glyphs * fsize * (font && font->width == 2 ? 1.0 : 0.5);
+            tm = mul({1, 0, 0, 1, adv, 0}, tm);
+            out->push_back(std::move(d));
+        };
+        for (auto& i : ins) {
+            const std::string& op = i.op;
+            if (op == "q") stack.push_back(g);
+            else if (op == "Q") { if (!stack.empty()) { g = stack.back(); stack.pop_back(); } }
+            else if (op == "cm") g.ctm = mul(numMat(i), g.ctm);
+            else if (op == "w") g.lw = num(i, 0);
+            else if (op == "g" || op == "rg" || op == "k") { Colour c; if (numeric(i, c)) g.fill = c; }
+            else if (op == "G" || op == "RG" || op == "K") { Colour c; if (numeric(i, c)) g.stroke = c; }
+            else if (op == "sc" || op == "scn") { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.fill = c; }
+            else if (op == "SC" || op == "SCN") { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.stroke = c; }
+            else if (op == "gs" && !i.a.empty() && i.a[0].isName() && egs.isDictionary()) {
+                auto d = egs.getKey(i.a[0].getName());
+                if (d.isDictionary()) {
+                    auto ca = d.getKey("/ca"), CA = d.getKey("/CA");
+                    if (ca.isNumber()) g.fa = ca.getNumericValue();
+                    if (CA.isNumber()) g.sa = CA.getNumericValue();
+                }
+            }
+            else if (op == "m") { subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
+            else if (op == "l") { if (subs.empty()) subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
+            else if (op == "c" || op == "v" || op == "y") {
+                if (subs.empty()) subs.emplace_back();
+                double x1, y1, x2, y2, x3, y3;
+                if (op == "c") { x1 = num(i, 0); y1 = num(i, 1); x2 = num(i, 2); y2 = num(i, 3); x3 = num(i, 4); y3 = num(i, 5); }
+                else if (op == "v") { x1 = cx; y1 = cy; x2 = num(i, 0); y2 = num(i, 1); x3 = num(i, 2); y3 = num(i, 3); }
+                else { x1 = num(i, 0); y1 = num(i, 1); x3 = num(i, 2); y3 = num(i, 3); x2 = x3; y2 = y3; }
+                for (int s = 1; s <= 8; ++s) {
+                    const double t = s / 8.0, u = 1 - t;
+                    subs.back().push_back(map(g.ctm, u * u * u * cx + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+                                                      u * u * u * cy + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3));
+                }
+                cx = x3; cy = y3;
+            }
+            else if (op == "re") {
+                const double x = num(i, 0), y = num(i, 1), w = num(i, 2), h = num(i, 3);
+                subs.emplace_back();
+                for (auto q : {std::make_pair(x, y), std::make_pair(x + w, y), std::make_pair(x + w, y + h), std::make_pair(x, y + h), std::make_pair(x, y)}) subs.back().push_back(map(g.ctm, q.first, q.second));
+            }
+            else if (op == "h") { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); }
+            else if (op == "S" || op == "s") { if (op == "s") { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); } paint(false, true); }
+            else if (op == "f" || op == "F" || op == "f*") paint(true, false);
+            else if (op == "B" || op == "B*" || op == "b" || op == "b*") paint(true, true);
+            else if (op == "n") subs.clear();
+            else if (op == "BT") { tm = tlm = {1, 0, 0, 1, 0, 0}; }
+            else if (op == "Tm" && i.a.size() == 6) tm = tlm = numMat(i);
+            else if (op == "Td") { tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+            else if (op == "TD") { leading = -num(i, 1); tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+            else if (op == "TL") leading = num(i, 0);
+            else if (op == "T*") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; }
+            else if (op == "Tf" && i.a.size() == 2 && i.a[0].isName()) {
+                fsize = i.a[1].getNumericValue();
+                const std::string nm = i.a[0].getName();
+                auto it = fcache.find(nm);
+                if (it == fcache.end()) it = fcache.emplace(nm, loadFont(fonts.isDictionary() ? fonts.getKey(nm) : QPDFObjectHandle::newNull())).first;
+                font = &it->second;
+            }
+            else if (op == "Tj" || op == "TJ") showText(i);
+            else if (op == "'" || op == "\"") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; showText(i); }
+            else if (op == "Do" && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) {
+                QPDFObjectHandle x = xo.getKey(i.a[0].getName());
+                if (!x.isStream()) continue;
+                auto sub = x.getDict().getKey("/Subtype");
+                if (sub.isName() && sub.getName() == "/Image") {
+                    DrawItem d; d.kind = DrawItem::ImageBox;
+                    for (auto q : {std::make_pair(0.0, 0.0), std::make_pair(1.0, 0.0), std::make_pair(1.0, 1.0), std::make_pair(0.0, 1.0), std::make_pair(0.0, 0.0)}) d.pts.push_back(map(g.ctm, q.first, q.second));
+                    d.r = d.g = d.b = 0.6f; d.a = 0.5f;
+                    out->push_back(std::move(d));
+                } else if (sub.isName() && sub.getName() == "/Form" && depth < 4) {
+                    St h = g;
+                    Mat fm{1, 0, 0, 1, 0, 0};
+                    auto mt = x.getDict().getKey("/Matrix");
+                    if (mt.isArray() && mt.getArrayNItems() == 6) for (int q = 0; q < 6; ++q) fm[q] = mt.getArrayItem(q).getNumericValue();
+                    h.ctm = mul(fm, g.ctm);
+                    try {
+                        Collect cb; x.parseAsContents(&cb);
+                        auto fres = x.getDict().getKey("/Resources");
+                        ++depth;
+                        run(cb.out, fres.isDictionary() ? fres : res, h);
+                        --depth;
+                    } catch (...) { }
+                }
+            }
+        }
+    }
+};
+}  // namespace
+
+PageDrawing drawPage(const std::filesystem::path& in, int page) {
+    PageDrawing R;
+    QPDF pdf; std::string err;
+    if (!load(pdf, in, err)) { R.error = err; return R; }
+    try {
+        QPDFPageDocumentHelper doc(pdf);
+        doc.pushInheritedAttributesToPage();
+        auto pages = doc.getAllPages();
+        R.pageCount = (int)pages.size();
+        if (page < 1 || page > R.pageCount) { R.error = "页码超出范围"; return R; }
+        auto& pg = pages[page - 1];
+        auto mb = pg.getMediaBox().getArrayAsRectangle();
+        Painter P; P.out = &R.items;
+        P.ox = std::min(mb.llx, mb.urx); P.oy = std::min(mb.lly, mb.ury);
+        R.w = std::fabs(mb.urx - mb.llx); R.h = std::fabs(mb.ury - mb.lly);
+        P.H = R.h;
+        auto ins = parsePage(pg);
+        Painter::St st;
+        P.run(ins, pg.getObjectHandle().getKey("/Resources"), st);
         R.ok = true;
     } catch (std::exception& e) { R.error = e.what(); }
     return R;

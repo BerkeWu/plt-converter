@@ -2,6 +2,7 @@
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
 #include <qpdf/QPDFPageObjectHelper.hh>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <set>
@@ -148,6 +149,54 @@ int main(int argc, char** argv) {
         CHECK(bm); CHECK(!r.hasRemovable());
         auto rr = wm::remove(dir / "E_bitmap.pdf", tmp("wm_E_out.pdf"));
         CHECK(!rr.ok);
+    }
+    // batch: grouping, recipes, integrity check
+    {
+        std::vector<wm::Report> reps;
+        for (const char* n : {"C_flat.pdf", "D_flat.pdf", "B_block.pdf", "A_clean.pdf", "E_bitmap.pdf", "nope.pdf"}) reps.push_back(wm::analyze(dir / n));
+        auto g = wm::groupReports(reps);
+        CHECK(g[0] == g[1] && g[0] >= 0);              // two flattened-text files: one group
+        CHECK(g[2] >= 0 && g[2] != g[0]);              // banner: another group
+        CHECK(g[3] == -1 && g[4] == -2 && g[5] == -3); // clean, bitmap, unreadable
+        // recipe round trip
+        wm::Recipe rc; rc.name = "测试配方"; rc.signature = wm::signatureOf(reps[0]); rc.texts = {"小红叶", "SAMPLE"};
+        wm::ShapeTemplate t; t.name = "图形"; t.strokes = {{{1.5, 2.25}, {3.125, 4.5}}, {{0, 0}, {10, 10}, {20, 5}}};
+        rc.shapes.push_back(t);
+        auto rf = tmp("wm_recipe.wmrecipe");
+        CHECK(wm::saveRecipe(rf, rc));
+        wm::Recipe back; CHECK(wm::loadRecipe(rf, back));
+        CHECK(back.name == rc.name && back.signature == rc.signature && back.texts == rc.texts && back.shapes.size() == 1 && back.shapes[0].strokes.size() == 2);
+        CHECK(back.shapes[0].strokes[1].size() == 3 && std::fabs(back.shapes[0].strokes[0][1].first - 3.125) < 1e-6);
+        CHECK(!wm::loadRecipe(dir / "A_clean.pdf", back));
+        // conformity: same type scores high, different type scores low
+        CHECK(wm::conformity(reps[1], rc) >= 85);
+        CHECK(wm::conformity(reps[2], rc) < 70);
+        // flattened text recipe: strokes unchanged, verified
+        wm::Recipe flat; flat.signature = wm::signatureOf(reps[0]);
+        auto o = tmp("wm_batch_flat.pdf");
+        auto fr = wm::applyRecipe(dir / "D_flat.pdf", o, flat);
+        CHECK(fr.ok && fr.verified && fr.strokesBefore == fr.strokesAfter && fr.removedTotal() > 100);
+        CHECK(!wm::applyRecipe(dir / "D_flat.pdf", dir / "D_flat.pdf", flat).ok);        // never overwrite the original
+        auto nothing = wm::applyRecipe(dir / "A_clean.pdf", tmp("wm_batch_none.pdf"), flat);
+        CHECK(!nothing.ok && nothing.nothingToDo);
+        CHECK(!std::filesystem::exists(tmp("wm_batch_none.pdf")));
+        // stroke-drawn label template taken from one file, applied as a recipe: exact stroke accounting
+        wm::Recipe sr; sr.removeDetected = false;
+        wm::ShapeTemplate st; auto ex = wm::extractShape(dir / "H_vector_text.pdf", 2, {315, 590, 365, 712}, st);
+        CHECK(ex.ok && ex.selected >= 12 && st.strokes.size() == (size_t)ex.selected);
+        sr.shapes.push_back(st);
+        auto so = tmp("wm_batch_shape.pdf");
+        auto sres = wm::applyRecipe(dir / "H_vector_text.pdf", so, sr);
+        CHECK(sres.ok && sres.verified && sres.shapesRemoved >= 90 && sres.strokesAfter == sres.strokesBefore - sres.shapesRemoved);
+        CHECK(sres.strokesAfter == wm::countStrokes(so));
+        // a template that is not in the file: nothing to do, no output
+        auto none = wm::applyRecipe(dir / "C_flat.pdf", tmp("wm_batch_none2.pdf"), sr);
+        CHECK(!none.ok && none.nothingToDo);
+        // text + detected together on the banner file
+        wm::Recipe both; both.signature = wm::signatureOf(reps[2]); both.texts = {"微信"};
+        auto bo = tmp("wm_batch_both.pdf");
+        auto br = wm::applyRecipe(dir / "B_block.pdf", bo, both);
+        CHECK(br.ok && br.verified && br.textsRemoved > 0 && br.detected.ok);
     }
     // missing file
     CHECK(!wm::analyze(dir / "nope.pdf").ok);
