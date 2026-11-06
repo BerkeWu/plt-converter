@@ -543,7 +543,9 @@ void MainWindow::notify(const QString& title, const QString& text) {
 
 layout::Params MainWindow::currentParams() const {
     if (batch_ && cur_ >= 0 && cur_ < items_.size()) return batchParams(s_, opts_, cur_, items_[cur_]->path);
-    return toParams(s_);
+    layout::Params p = toParams(s_);
+    if (s_.fileTag && !path_.isEmpty()) p.fileTag = fileTagFor(path_).toUtf8().toStdString();
+    return p;
 }
 
 EditCtx MainWindow::grabCtx() const {
@@ -606,6 +608,8 @@ void MainWindow::convertToBatch() {
     setBatchMode(true);
     State t = tmpl_;
     copyLayout(t, st);
+    opts_.fileTag = st.fileTag;
+    t.fileTag = false;
     tmpl_ = t;
     tmplBefore_ = t;
     s_ = t;
@@ -1038,6 +1042,7 @@ State MainWindow::deriveState(const BatchItem& it, const State& base) const {
     State n = base;
     n.ignoreFrame = it.state.ignoreFrame; n.rot = it.state.rot; n.mirror = it.state.mirror;
     n.hasSel = it.state.hasSel; n.sel = it.state.sel; n.selClip = it.state.selClip;
+    n.blanked = it.state.blanked;     // pages this file's user set to blank by hand
     n.offX = n.offY = 0;
     return n;
 }

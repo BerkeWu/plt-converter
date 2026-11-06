@@ -18,6 +18,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPointer>
@@ -124,7 +125,7 @@ PlanResult computePlan(quint64 gen, std::shared_ptr<const plt::Document> doc, la
         for (int i = 0; i < n; ++i) {
             const auto& pg = plan.pages[i];
             PageMeta m;
-            m.row = pg.row; m.col = pg.col; m.overview = pg.overview; m.empty = pg.empty; m.w = pg.w; m.h = pg.h;
+            m.row = pg.row; m.col = pg.col; m.overview = pg.overview; m.empty = pg.empty; m.manual = pg.manual; m.w = pg.w; m.h = pg.h;
             m.label = QString::fromUtf8(pg.label.c_str());
             r.meta.push_back(m);
             if (i < 150) r.thumbs.push_back(renderPageThumb(pg, 300, plan.calibCollision && pg.label == "1-1"));
@@ -330,6 +331,15 @@ QPushButton* plainButton(const QString& t) {
     b->setCursor(Qt::PointingHandCursor);
     return b;
 }
+// Click-to-edit box (wheel / hover never change it) for the four settings that used to be changed by accident.
+QDoubleSpinBox* clickSpin(double lo, double hi, double step, int dec, const QString& suffix) {
+    auto* s = new ClickSpinBox;
+    s->setRange(lo, hi);
+    s->setSingleStep(step);
+    s->setDecimals(dec);
+    s->setSuffix(suffix);
+    return s;
+}
 QDoubleSpinBox* spin(double lo, double hi, double step, int dec, const QString& suffix) {
     auto* s = new QDoubleSpinBox;
     s->setRange(lo, hi);
@@ -454,9 +464,9 @@ QWidget* MainWindow::buildLayoutPanel() {
     connect(orientGrp_, &QButtonGroup::idClicked, this, [this](int id) { edit([id](State& s) { s.landscape = id == 1; s.autoOrient = false; }); });
     connect(autoOrient_, &QCheckBox::toggled, this, [this](bool on) { edit([on](State& s) { s.autoOrient = on; }); });
 
-    overlapSlider_ = new QSlider(Qt::Horizontal);
+    overlapSlider_ = new NoWheelSlider(Qt::Horizontal);
     overlapSlider_->setRange(0, 30);
-    overlapSpin_ = spin(0, 30, 1, 0, " mm");
+    overlapSpin_ = clickSpin(0, 30, 1, 0, " mm");
     auto* ovRow = new QWidget;
     auto* ovl = new QVBoxLayout(ovRow);
     ovl->setContentsMargins(0, 0, 0, 0);
@@ -470,8 +480,7 @@ QWidget* MainWindow::buildLayoutPanel() {
 
     l->addWidget(sectionLabel(tr("页边距")));
     QWidget* mseg = makeSegmented({"0", "3", "5", "10"}, marginGrp_);
-    marginSpin_ = spin(0, 50, 1, 0, " mm");
-    marginSpin_->setToolTip(tr("自定义页边距"));
+    marginSpin_ = clickSpin(0, 50, 1, 0, " mm");
     l->addWidget(rowOf(mseg, marginSpin_));
     l->addWidget(noteLabel(tr("0 mm 边距不代表物理零边距：部分打印机会强制留白，请用校准框校准。")));
     connect(marginGrp_, &QButtonGroup::idClicked, this, [this](int id) { edit([id](State& s) { s.margin = kMargins[id]; }); });
@@ -490,6 +499,8 @@ QWidget* MainWindow::buildLayoutPanel() {
     l->addWidget(noteLabel(tr("开启后整个图形输出为一页（页面 = 图形 + 2×边距），纸张与方向置灰；不输出页码、重叠区和对位标记。")));
     addSwitch(tr("页码与标识"), pageNoSw_, [](State& s, bool v) { s.pageNumbers = v; });
     l->addWidget(noteLabel(tr("页码为大号加粗、带边框、80% 透明度。横向纸张在每页左上角，竖向纸张在底部中间；顶部/底部固定水印始终输出。")));
+    addSwitch(tr("页码旁附加文件名（≤20 字）"), fileTagSw_, [](State& s, bool v) { s.fileTag = v; });
+    fileTagRow_ = fileTagSw_->parentWidget();      // batch mode has its own switch in 批量选项
     addSwitch(tr("拼接对位标记"), alignSw_, [](State& s, bool v) { s.alignMarks = v; });
     l->addWidget(noteLabel(tr("拼接框的四条虚线贯穿整页，每个框角一个「+」。颜色：")));
     auto* asw = new QWidget;
@@ -546,12 +557,12 @@ QWidget* MainWindow::buildLayoutPanel() {
     });
     colorNote_ = noteLabel();
     l->addWidget(colorNote_);
-    lineWidthSpin_ = spin(0.05, 2.0, 0.05, 2, " mm");
+    lineWidthSpin_ = clickSpin(0.05, 2.0, 0.05, 2, " mm");
     l->addWidget(rowOf(sectionLabel(tr("线宽")), lineWidthSpin_));
     connect(lineWidthSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.lineWidth = v; }, "lw"); });
 
     addSwitch(tr("校准框（仅第 1 页）"), calibSw_, [](State& s, bool v) { s.calibBox = v; });
-    calibSpin_ = spin(1, 20, 0.5, 1, " cm");
+    calibSpin_ = clickSpin(1, 20, 0.5, 1, " cm");
     l->addWidget(rowOf(noteLabel(tr("校准框边长（默认 5 cm）")), calibSpin_));
     connect(calibSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.calibCm = v; }, "calib"); });
     addSwitch(tr("添加拼接效果图（PDF 第 1 页）"), overviewSw_, [](State& s, bool v) { s.overview = v; });
@@ -709,6 +720,7 @@ QWidget* MainWindow::buildCanvasPage() {
     strip_->setSpacing(8);
     strip_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     strip_->setFrameShape(QFrame::NoFrame);
+    strip_->setContextMenuPolicy(Qt::CustomContextMenu);
     tl->addWidget(strip_, 1);
     auto* printTip = noteLabel(tr("打印时请选择「实际大小 / 100%」，勿选「适应页面」。"));
     printTip->setMaximumWidth(190);
@@ -761,10 +773,24 @@ QWidget* MainWindow::buildPreviewPage() {
     auto* page = new QWidget;
     auto* l = new QVBoxLayout(page);
     l->setContentsMargins(16, 12, 16, 12);
-    auto* head = new QLabel(tr("预览全部页面 — 勾选需要导出的页（双击缩略图可回到画布定位）"));
+    auto* head = new QLabel(tr("预览全部页面 — 勾选需要导出的页（双击缩略图可回到画布定位；点选缩略图，Ctrl/Shift 可多选，再设为空白页）"));
     head->setProperty("lb", true);
-    l->addWidget(head);
+    head->setWordWrap(true);
+    blankBtn_ = plainButton(tr("设为空白页"));
+    blankBtn_->setToolTip(tr("把选中的页设为空白页：纸样线条不再印出，页码和对位标记保留。也可在缩略图上点右键。"));
+    unblankBtn_ = plainButton(tr("恢复内容"));
+    unblankBtn_->setToolTip(tr("取消所选页的「空白页」设置，恢复该页原有的纸样内容。"));
+    auto* hrow = new QWidget;
+    auto* hl2 = new QHBoxLayout(hrow);
+    hl2->setContentsMargins(0, 0, 0, 0);
+    hl2->setSpacing(8);
+    hl2->addWidget(head, 1);
+    hl2->addWidget(blankBtn_);
+    hl2->addWidget(unblankBtn_);
+    l->addWidget(hrow);
     grid_ = new QListWidget;
+    grid_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    grid_->setContextMenuPolicy(Qt::CustomContextMenu);
     grid_->setViewMode(QListView::IconMode);
     grid_->setResizeMode(QListView::Adjust);
     grid_->setMovement(QListView::Static);
@@ -775,6 +801,17 @@ QWidget* MainWindow::buildPreviewPage() {
     grid_->setObjectName("grid");
     l->addWidget(grid_, 1);
     connect(grid_, &QListWidget::itemChanged, this, [this] { updateSelCount(); });
+    connect(grid_, &QListWidget::itemSelectionChanged, this, [this] { updateBlankButtons(); });
+    connect(grid_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) { pageContextMenu(grid_, pos); });
+    connect(strip_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) { pageContextMenu(strip_, pos); });
+    auto rowsOf = [this] {
+        QVector<int> rows;
+        for (auto* it : grid_->selectedItems()) rows << grid_->row(it);
+        return rows;
+    };
+    connect(blankBtn_, &QPushButton::clicked, this, [this, rowsOf] { setPagesBlank(rowsOf(), true); });
+    connect(unblankBtn_, &QPushButton::clicked, this, [this, rowsOf] { setPagesBlank(rowsOf(), false); });
+    updateBlankButtons();
     connect(grid_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* it) {
         const int row = grid_->row(it);
         goStep(1);
@@ -820,6 +857,8 @@ QPushButton[link="true"] { border:0; background:transparent; color:#0B6A61; font
 QPushButton:flat { border:0; background:transparent; color:#0B6A61; }
 QLineEdit { padding:5px 6px; border:1px solid #C3CECD; border-radius:6px; background:#fff; }
 QDoubleSpinBox { padding:4px 4px; }
+QDoubleSpinBox[locked="true"] { background:#F3F6F6; border:1px solid #DDE3E3; border-radius:6px; color:#1F2A2A; }
+QDoubleSpinBox[locked="false"] { background:#fff; border:1.5px solid #0B7A70; border-radius:6px; }
 QSlider::groove:horizontal { height:4px; background:#C3CECD; border-radius:2px; }
 QSlider::sub-page:horizontal { background:#0B7A70; border-radius:2px; }
 QSlider::handle:horizontal { width:14px; margin:-6px 0; border-radius:7px; background:#0B7A70; }
@@ -877,6 +916,7 @@ void MainWindow::applyState(const State& n) {
     s_ = n;
     if (raw_) {
         const bool g = !old.sameGeometryAs(n), sel = !old.sameSelectionAs(n);
+        if ((g || sel) && !s_.blanked.isEmpty()) s_.blanked.clear();   // the cells now show different drawing parts
         if (g) rebuildFull();
         if (g || sel) rebuildWork();
         if (g || sel) refreshCanvasView();
@@ -1002,6 +1042,8 @@ void MainWindow::syncUi() {
     setSw(singleSw_, s_.singlePage);
     setSw(pageNoSw_, s_.pageNumbers); pageNoSw_->setEnabled(!single);
     setSw(alignSw_, s_.alignMarks); alignSw_->setEnabled(!single);
+    setSw(fileTagSw_, s_.fileTag); fileTagSw_->setEnabled(!single);
+    fileTagRow_->setVisible(!batch_);
     {
         int idx = 5;
         for (int i = 0; i < 5; ++i) if (s_.alignColor == kAlignPresets[i]) idx = i;
@@ -1138,7 +1180,11 @@ void MainWindow::updateSummary() {
         t = tr("单页输出<br>页面尺寸 %1 × %2 mm").arg(last_.pageW, 0, 'f', 1).arg(last_.pageH, 0, 'f', 1);
     } else {
         t = tr("纸张 <b>%1 %2</b><br>网格 %3 × %4 · 有效页 <b>%5</b> 页").arg(s_.paper, s_.landscape ? tr("横向") : tr("竖向")).arg(last_.nx).arg(last_.ny).arg(last_.effective);
-        if (last_.blank > 0) t += tr("<br>空白页 %1 页（%2）").arg(last_.blank).arg(s_.keepBlank ? tr("已包含在 PDF 中，可在预览取消勾选") : tr("不输出"));
+        int manualN = 0;
+        for (const auto& m : meta_) if (m.manual) ++manualN;
+        const int autoBlank = std::max(0, last_.blank - manualN);
+        if (autoBlank > 0) t += tr("<br>空白页 %1 页（%2）").arg(autoBlank).arg(s_.keepBlank ? tr("已包含在 PDF 中，可在预览取消勾选") : tr("不输出"));
+        if (manualN > 0) t += tr("<br>手动设为空白页 %1 页（保留页码和对位标记，可在预览取消勾选）").arg(manualN);
         if (s_.overview) t += tr("<br>含拼接效果图 1 页");
         t += tr("<br>PDF 共 <b>%1</b> 页").arg(meta_.size());
     }
@@ -1154,7 +1200,8 @@ void MainWindow::rebuildThumbLists() {
     for (int i = 0; i < meta_.size(); ++i) {
         const PageMeta& m = meta_[i];
         QString cap = m.overview ? tr("拼接效果图") : tr("%1 · 第 %2 页").arg(m.label).arg(i + 1);
-        if (m.empty && !m.overview) cap += tr("（空白）");
+        if (m.manual) cap += tr("（已设为空白）");
+        else if (m.empty && !m.overview) cap += tr("（空白）");
         if (last_.calibCollision && s_.calibBox && m.label == "1-1") cap += tr(" ⚠校准框冲突");
         QIcon icon;
         if (i < thumbs_.size() && !thumbs_[i].isNull()) icon = QIcon(QPixmap::fromImage(thumbs_[i]));
@@ -1169,7 +1216,64 @@ void MainWindow::rebuildThumbLists() {
         if (m.empty && !m.overview) { a->setForeground(QColor("#8A9796")); g->setForeground(QColor("#8A9796")); }
     }
     if (keepRow >= 0 && keepRow < strip_->count()) strip_->setCurrentRow(keepRow);
+    if (!reselect_.isEmpty()) {
+        for (int i = 0; i < meta_.size() && i < grid_->count(); ++i) if (reselect_.contains(meta_[i].label)) grid_->item(i)->setSelected(true);
+        reselect_.clear();
+    }
     updateSelCount();
+    updateBlankButtons();
+}
+
+void MainWindow::setPagesBlank(const QVector<int>& rows, bool blank) {
+    if (!havePlan_ || s_.singlePage) return;
+    QStringList labels;
+    for (int r : rows) {
+        if (r < 0 || r >= meta_.size()) continue;
+        const PageMeta& m = meta_[r];
+        if (m.overview || m.row < 0) continue;
+        if (blank ? (m.manual || m.empty) : !m.manual) continue;    // nothing to do for pages that are blank anyway / not set by hand
+        labels << m.label;
+    }
+    if (labels.isEmpty()) return;
+    reselect_ = labels;
+    edit([labels, blank](State& s) {
+        for (const QString& l : labels) {
+            if (blank) { if (!s.blanked.contains(l)) s.blanked << l; }
+            else s.blanked.removeAll(l);
+        }
+        s.blanked.sort();
+    });
+}
+
+void MainWindow::updateBlankButtons() {
+    if (!blankBtn_) return;
+    bool canBlank = false, canRestore = false;
+    if (havePlan_ && !s_.singlePage)
+        for (auto* it : grid_->selectedItems()) {
+            const int r = grid_->row(it);
+            if (r < 0 || r >= meta_.size() || meta_[r].overview || meta_[r].row < 0) continue;
+            if (meta_[r].manual) canRestore = true; else if (!meta_[r].empty) canBlank = true;
+        }
+    blankBtn_->setEnabled(canBlank);
+    unblankBtn_->setEnabled(canRestore);
+}
+
+void MainWindow::pageContextMenu(QListWidget* list, const QPoint& pos) {
+    QListWidgetItem* it = list->itemAt(pos);
+    if (!it) return;
+    if (!it->isSelected()) { list->clearSelection(); it->setSelected(true); }
+    QVector<int> rows;
+    for (auto* x : list->selectedItems()) rows << list->row(x);
+    QMenu menu(this);
+    QAction* a = menu.addAction(tr("设为空白页（不印纸样线条）"));
+    QAction* b = menu.addAction(tr("恢复该页内容"));
+    bool canBlank = false, canRestore = false;
+    for (int r : rows) if (r >= 0 && r < meta_.size() && !meta_[r].overview && meta_[r].row >= 0) { if (meta_[r].manual) canRestore = true; else if (!meta_[r].empty) canBlank = true; }
+    a->setEnabled(canBlank && !s_.singlePage);
+    b->setEnabled(canRestore && !s_.singlePage);
+    QAction* ch = menu.exec(list->viewport()->mapToGlobal(pos));
+    if (ch == a) setPagesBlank(rows, true);
+    else if (ch == b) setPagesBlank(rows, false);
 }
 
 QVector<int> MainWindow::checkedPages() const {
@@ -1297,7 +1401,7 @@ void MainWindow::onParsed(const ParseResult& r, const QString& path) {
     hasFrame_ = r.frameIdx >= 0;
     // keep the user's layout preferences, reset everything tied to the drawing
     State n = s_;
-    n.ignoreFrame = false; n.rot = 0; n.mirror = false; n.hasSel = false; n.offX = n.offY = 0; n.autoOrient = true;
+    n.ignoreFrame = true; n.rot = 0; n.mirror = false; n.hasSel = false; n.offX = n.offY = 0; n.autoOrient = true; n.blanked.clear();
     s_ = n;
     undo_.clear(); redo_.clear(); lastKey_.clear();
     dismissLarger_ = false;
@@ -1313,7 +1417,7 @@ void MainWindow::onParsed(const ParseResult& r, const QString& path) {
                           .arg(QFileInfo(path).fileName().toHtmlEscaped(), humanSize(fileSize_)).arg(d.bounds.w(), 0, 'f', 1).arg(d.bounds.h(), 0, 'f', 1)
                           .arg(d.lines.size()).arg(d.segmentCount).arg(d.totalLengthMm / 1000, 0, 'f', 2));
     notices_.clear();
-    if (hasFrame_) notices_ << tr("检测到纸张边框（门幅边框）。可勾选「忽略纸张边框」移除并重算尺寸。");
+    if (hasFrame_) notices_ << tr("检测到纸张边框（门幅边框），已默认忽略并按剩余内容重算尺寸（可在左侧取消勾选「忽略纸张边框」）。");
     if (d.unsupported.count("LB")) notices_ << tr("检测到 %1 处文字标注（LB）未渲染，其余内容不受影响。").arg(d.unsupported.at("LB"));
     int skipped = 0;
     QStringList names;
@@ -1429,15 +1533,17 @@ void MainWindow::loadSettings() {
     State n;
     n.paper = q.value("paper", n.paper).toString();
     if (!kPapers.contains(n.paper)) n.paper = "A4";
-    n.margin = q.value("margin", n.margin).toDouble();
-    n.overlap = std::clamp(q.value("overlap", n.overlap).toDouble(), 0.0, 30.0);
+    // v3: 页边距 0 / 重叠区 10 / 线宽 0.1 / 校准框 5 cm became the defaults; values saved by older versions are not carried over
+    const bool v3 = q.value("settingsVersion", 1).toInt() >= 3;
+    if (v3) n.margin = q.value("margin", n.margin).toDouble();
+    if (v3) n.overlap = std::clamp(q.value("overlap", n.overlap).toDouble(), 0.0, 30.0);
     n.pageNumbers = q.value("pageNumbers", n.pageNumbers).toBool();
     n.calibBox = q.value("calibBox", n.calibBox).toBool();
     n.alignMarks = q.value("alignMarks", n.alignMarks).toBool();
     const bool v2 = q.value("settingsVersion", 1).toInt() >= 2;   // v1 stored 「拼接效果图」 = off as a side effect; the default is now on
     if (v2) n.overview = q.value("overview", n.overview).toBool();
-    n.calibCm = q.value("calibCm", n.calibCm).toDouble();
-    n.lineWidth = q.value("lineWidth", n.lineWidth).toDouble();
+    if (v3) n.calibCm = q.value("calibCm", n.calibCm).toDouble();
+    if (v3) n.lineWidth = q.value("lineWidth", n.lineWidth).toDouble();
     n.origColor = q.value("origColor", n.origColor).toBool();
     n.alignColor = QColor(q.value("alignColor", n.alignColor.name()).toString());
     if (!n.alignColor.isValid()) n.alignColor = QColor("#2563EB");
@@ -1449,7 +1555,7 @@ void MainWindow::loadSettings() {
 void MainWindow::saveSettings() {
     if (batch_ && bstep_ != 1) return;  // per-file parameters are not the user's defaults
     QSettings q("HaoyangPattern", "PltConverter");
-    q.setValue("settingsVersion", 2);
+    q.setValue("settingsVersion", 3);
     q.setValue("paper", s_.paper);
     q.setValue("alignColor", s_.alignColor.name());
     q.setValue("margin", s_.margin);

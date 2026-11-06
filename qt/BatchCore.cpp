@@ -265,7 +265,7 @@ bool sessionFromJson(const QByteArray& data, State& tmpl, BatchOptions& o, QVect
     const QJsonObject root = doc.object();
     tmpl = stateFromJson(root["template"].toObject());
     const QJsonObject oo = root["options"].toObject();
-    o.calibFirstOnly = oo["calibFirstOnly"].toBool(false); o.fileTag = oo["fileTag"].toBool(true);
+    o.calibFirstOnly = oo["calibFirstOnly"].toBool(false); o.fileTag = oo["fileTag"].toBool(false);
     o.autoPosition = oo["autoPosition"].toBool(false); o.outDir = oo["outDir"].toString();
     o.concurrency = std::clamp(oo["concurrency"].toInt(2), 1, 4);
     items.clear();

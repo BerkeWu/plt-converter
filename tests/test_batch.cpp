@@ -128,6 +128,7 @@ int main(int argc, char** argv) {
         if (it.state.paper != "A3") ++mism;
         // exhaustive check: both orientations, fewest effective pages wins (PRD 4.9)
         ParseResult pr = parseJob(it.path);
+        if (it.state.ignoreFrame) plt::stripFrame(*pr.doc);       // 「忽略纸张边框」 is on by default
         layout::Params p = batchParams(it.state, w.batchOptions(), i, it.path);
         p.orient = layout::Orient::Portrait;  const int pp = layout::buildPlan(*pr.doc, p).effectivePages;
         p.orient = layout::Orient::Landscape; const int pl = layout::buildPlan(*pr.doc, p).effectivePages;
@@ -148,6 +149,24 @@ int main(int argc, char** argv) {
     w.undo();
     CHECK(w.batchItems()[first]->state.overlap == 10, "per-file undo");
     w.redo();
+    {   // hand-set blank page in the per-file preview: stored with this file only
+        for (int g = 0; g < 100 && !(w.batchItems()[first]->doc && w.planValid()); ++g) pump(60);
+        waitPlan(w);
+        int pick = -1;
+        for (int i = 0; i < w.lastPlan().meta.size(); ++i) if (!w.lastPlan().meta[i].empty && !w.lastPlan().meta[i].overview) { pick = i; break; }
+        if (pick >= 0) {
+            const QString lab = w.lastPlan().meta[pick].label;
+            const int eff = w.lastPlan().effective;
+            w.blankPages({pick}, true);
+            waitPlan(w);
+            CHECK(w.batchItems()[first]->state.blanked == QStringList{lab}, "batch: hand-set blank page is stored in the file's own state");
+            CHECK(w.lastPlan().effective == eff - 1, "batch: the blank page is no longer effective");
+            CHECK(w.batchItems()[first]->state.fileTag == false && !w.batchOptions().fileTag, "batch: file name beside the page number is off by default");
+            w.blankPages({pick}, false);
+            waitPlan(w);
+            CHECK(w.batchItems()[first]->state.blanked.isEmpty(), "batch: restoring the page clears the override");
+        }
+    }
     {   // optimisation hint: a drawing that sticks out by 3 mm gets "move left 3 mm" + a dashed ghost, and the button applies it
         w.batchActivate(4);   // 190 x 90 mm
         for (int g = 0; g < 100 && !(w.batchItems()[4]->doc && w.planValid()); ++g) pump(60);

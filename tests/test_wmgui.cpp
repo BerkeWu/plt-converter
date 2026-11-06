@@ -30,8 +30,13 @@ static void waitIdle(WatermarkPanel& p, int ms = 60000) {
 class WmGuiTest : public QObject {
     Q_OBJECT
     QString data_;
+    QTemporaryDir cfgDir_;
 private slots:
-    void initTestCase() { data_ = QString::fromLocal8Bit(qgetenv("WM_DATA")); QVERIFY(QDir(data_).exists()); }
+    void initTestCase() {
+        QSettings::setDefaultFormat(QSettings::IniFormat);                               // never touch the user's real settings
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, cfgDir_.path());
+        data_ = QString::fromLocal8Bit(qgetenv("WM_DATA")); QVERIFY(QDir(data_).exists());
+    }
 
     void limitIsTwenty() {
         QTemporaryDir td;
@@ -369,8 +374,6 @@ private slots:
         const QString pltDir = QString::fromLocal8Bit(qgetenv("PLT_DATA"));
         if (pltDir.isEmpty()) QSKIP("PLT_DATA not set");
         auto cpu = [] { struct rusage ru; getrusage(RUSAGE_SELF, &ru); return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6; };
-        QSettings::setDefaultFormat(QSettings::IniFormat);
-        QTemporaryDir cfg; QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, cfg.path());
         QFile::remove(batchSessionPath());
         struct Cleanup { ~Cleanup() { QFile::remove(batchSessionPath()); } } cleanup;   // never leave a session behind (it would pop a restore dialog in the next test)
         // main-thread stall monitor
@@ -529,6 +532,12 @@ private slots:
         QVERIFY(!w.watermarkVisible());
     }
 };
+
+// settings go to a throw-away folder (set before QApplication exists): the tests never read or write the user's real ones
+static const struct IsolatedConfig {
+    QTemporaryDir dir;
+    IsolatedConfig() { qputenv("XDG_CONFIG_HOME", dir.path().toLocal8Bit()); }
+} isolatedConfig;
 
 QTEST_MAIN(WmGuiTest)
 #include "test_wmgui.moc"

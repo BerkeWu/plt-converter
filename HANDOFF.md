@@ -207,3 +207,10 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - 性能：`core/wm/wm.cpp` 自写 `Tokenizer`/`Arg`/`Instr`（保留原文字节，序列化不改写数字）；`traceEvents(..., keepPts=false)`；`WatermarkPanel::workPool_`（≤3 线程、低优先级）。仍可优化：`applyRecipe`/`drawPage`/`countStrokes` 各自重复解析整份文件（文档2 首次审阅预览约 7 s，后台单线程、有缓存）。
 - 位图型（e8cf131f）：页面由 11 块 JPEG 拼成，水印在像素里，无独立对象，不可去除。
 - 回归：tests/test_wm.cpp 新增 I、J 两段；ctest 5/5。
+
+
+## 第十八轮：参数区优化 + 手动空白页（单文件/批量共用面板）
+- `qt/Widgets.h`：`ClickSpinBox`（锁定=只读+无按钮，点击/`eventFilter` 解锁，editingFinished/失焦/Esc 重新锁定，`wheelEvent` 一律忽略）、`NoWheelSlider`。无 Q_OBJECT：测试里用 `dynamic_cast`，不要用 `qobject_cast/findChild<ClickSpinBox*>`（会匹配所有 QDoubleSpinBox）。
+- `State`：默认 margin 0 / lineWidth 0.1 / ignoreFrame true；新增 `fileTag`（单文件）、`blanked`（QStringList，「行-列」标签）。`loadSettings` 设置版本 3 才读取旧的边距/重叠/线宽/校准框。批量的文件名开关仍是 `BatchOptions::fileTag`（默认 false，面板里的单文件开关在批量模式隐藏；单→批 `convertToBatch` 会带过去）。
+- 手动空白页：`layout::buildPlan` 对 `blankLabels` 里的格子清空纸样线条、`manual=true`、不被 skipEmpty 丢弃；`chooseOrientation/autoOffset` 忽略它。`MainWindow::setPagesBlank/updateBlankButtons/pageContextMenu`；`applyState` 在几何/选区变化时清空；批量 `deriveState` 保留每个文件自己的 `blanked`。
+- 测试隔离：test_gui / test_wmgui 通过 `XDG_CONFIG_HOME` 隔离设置（之前会污染 ~/.config 导致默认值断言偶发失败）。

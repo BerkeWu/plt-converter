@@ -99,6 +99,28 @@ int main(int argc, char** argv) {
         fs::remove_all(dir);
     }
 
+    // 1c'. pages the user set to blank by hand: lines gone, sheet (number + marks) still output, even when empty pages are skipped
+    {
+        plt::Document d = plt::parseString("IN;PU0,0;PD12000,0,12000,8000,0,8000,0,0;");  // 300 x 200 mm -> two landscape A4 pages
+        layout::Params p; p.orient = layout::Orient::Landscape; p.calibBox = false; p.overview = false; p.margin = 0; p.overlap = 10;
+        layout::Plan a = layout::buildPlan(d, p);
+        CHECK(a.pages.size() == 2 && a.effectivePages == 2, "blank-page test base: two pages with pattern");
+        p.blankLabels = {"1-2"};
+        layout::Plan b = layout::buildPlan(d, p);
+        CHECK(b.pages.size() == 2 && b.effectivePages == 1 && b.blankPages == 1, "hand-set blank page is still output but not counted as effective");
+        const layout::Page* blank = nullptr;
+        for (auto& pg : b.pages) if (pg.label == "1-2") blank = &pg;
+        CHECK(blank && blank->manual && blank->empty, "page flagged as manual blank");
+        bool anyPattern = false;
+        if (blank) for (auto& pa : blank->paths) if (!(pa.style.b > 0.8 && pa.style.r < 0.3)) anyPattern = true;   // only blue alignment marks remain
+        CHECK(blank && !anyPattern, "no pattern line is printed on the blank page");
+        bool number = false;
+        if (blank) for (auto& t : blank->texts) if (t.utf8 == "1-2") number = true;
+        CHECK(number, "blank page keeps its page number");
+        p.singlePage = true;
+        CHECK(layout::buildPlan(d, p).pages.size() == 1, "blank labels are ignored in single-page output");
+    }
+
     // 1d. page number style + alignment marks (dashed, blue by default)
     {
         plt::Document d = plt::parseString("IN;PU0,0;PD12000,0,12000,8000,0,8000,0,0;");  // 300 x 200 mm

@@ -41,7 +41,7 @@ class WatermarkPanel;
 
 struct PageMeta {
     int row = -1, col = -1;
-    bool overview = false, empty = false;
+    bool overview = false, empty = false, manual = false;   // manual: set to blank by the user
     double w = 0, h = 0;
     QString label;
 };
@@ -133,6 +133,7 @@ public:
     int frameRemoved() const { return frameRemoved_; }   // lines removed by 「忽略纸张边框」 in the current drawing
     int workLineCount() const { return work_ ? int(work_->lines.size()) : 0; }
     bool planValid() const { return havePlan_; }
+    void blankPages(const QVector<int>& rows, bool blank) { setPagesBlank(rows, blank); }   // 手动空白页（预览里的按钮 / 右键菜单走同一入口）
 
     // ---- batch conversion (PRD module 5) ----
     void setBatchMode(bool on);
@@ -255,6 +256,9 @@ private:
     void updateInfoLabels();
     void updateSummary();
     void rebuildThumbLists();
+    void setPagesBlank(const QVector<int>& rows, bool blank);   // 手动空白页：把选中的页设为空白 / 恢复内容
+    void updateBlankButtons();
+    void pageContextMenu(QListWidget* list, const QPoint& pos);
     // actions
     void chooseFile();
     void onParsed(const ParseResult& r, const QString& path);
@@ -289,6 +293,8 @@ private:
     QTimer planTimer_, saveTimer_;
     quint64 gen_ = 0;
     QVector<PageMeta> meta_;
+    QStringList reselect_;                 // page labels to select again after the lists are rebuilt
+    QPushButton *blankBtn_ = nullptr, *unblankBtn_ = nullptr;
     QVector<QImage> thumbs_;
     PlanResult last_;
     bool havePlan_ = false;
@@ -347,6 +353,8 @@ private:
     QLabel *paperNote_ = nullptr, *orientNote_ = nullptr;
     QCheckBox* autoOrient_ = nullptr;
     QSlider* overlapSlider_ = nullptr;
+    ToggleSwitch* fileTagSw_ = nullptr;
+    QWidget* fileTagRow_ = nullptr;
     QDoubleSpinBox *overlapSpin_ = nullptr, *marginSpin_ = nullptr, *lineWidthSpin_ = nullptr, *calibSpin_ = nullptr, *xSpin_ = nullptr, *ySpin_ = nullptr;
     ToggleSwitch *singleSw_ = nullptr, *pageNoSw_ = nullptr, *calibSw_ = nullptr, *overviewSw_ = nullptr, *alignSw_ = nullptr, *blankSw_ = nullptr;
     QLabel* colorNote_ = nullptr;

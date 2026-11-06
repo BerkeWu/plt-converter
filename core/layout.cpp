@@ -249,12 +249,13 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
             const double tx0 = c == 0 ? p.margin : plan.inset, tx1 = c == plan.nx - 1 ? plan.pageW - p.margin : plan.pageW - plan.inset;
             const double ty0 = r == 0 ? p.margin : plan.inset, ty1 = r == plan.ny - 1 ? plan.pageH - p.margin : plan.pageH - plan.inset;
             pg.empty = !pathsHitRect(pg.paths, tx0, ty0, tx1, ty1);
+            if (!single && std::find(p.blankLabels.begin(), p.blankLabels.end(), pg.label) != p.blankLabels.end()) { pg.paths.clear(); pg.empty = true; pg.manual = true; }
             grid.push_back(std::move(pg));
         }
 
     for (auto& pg : grid) {
         const bool first = pg.row == 0 && pg.col == 0;
-        if (pg.empty && !(first && p.calibBox) && p.skipEmpty) { ++plan.blankPages; continue; }
+        if (pg.empty && !pg.manual && !(first && p.calibBox) && p.skipEmpty) { ++plan.blankPages; continue; }
         if (pg.empty) ++plan.blankPages; else ++plan.effectivePages;
         if (p.alignMarks && !single) addAlignMarks(pg, p, plan.inset);
         addMarks(pg, p, portrait, !single);
@@ -287,6 +288,7 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
 }
 
 OrientChoice chooseOrientation(const plt::Document& doc, Params p) {
+    p.blankLabels.clear();   // hand-set blanks belong to the cells of the chosen layout, not to the comparison
     p.overview = false; p.calibBox = false;  // not relevant for counting
     p.orient = Orient::Portrait;  Plan a = buildPlan(doc, p);
     p.orient = Orient::Landscape; Plan b = buildPlan(doc, p);
@@ -300,6 +302,7 @@ OrientChoice chooseOrientation(const plt::Document& doc, Params p) {
 }
 
 OffsetChoice autoOffset(const plt::Document& doc, Params p) {
+    p.blankLabels.clear();
     OffsetChoice best;
     if (p.singlePage) return best;
     p.overview = false; p.calibBox = false;

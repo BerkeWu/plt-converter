@@ -32,7 +32,7 @@ enum class ItemStatus { Scanning, Parsed, ToConfirm, Confirmed, Adjusted, Export
 
 struct BatchOptions {
     bool calibFirstOnly = false;   // 校准框: false = 每个文件第一页, true = 仅批量首个文件
-    bool fileTag = true;           // 页码旁附加文件名（≤20 字符）
+    bool fileTag = false;          // 页码旁附加文件名（≤20 字符）
     bool autoPosition = false;     // 图形位置初始策略: false = 左上对齐, true = 自动优化位置
     QString outDir;                // empty = 源文件所在目录
     int concurrency = 2;           // 导出并发

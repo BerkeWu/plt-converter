@@ -15,6 +15,7 @@
 
 #include "../qt/CanvasWidget.h"
 #include "../qt/MainWindow.h"
+#include "../qt/Widgets.h"
 
 static int fails = 0;
 static void pump(int ms) { QEventLoop l; QTimer::singleShot(ms, &l, &QEventLoop::quit); l.exec(); }
@@ -47,6 +48,8 @@ static QString pdfInfo(const QString& pdf, const QString& key) {
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
+    QTemporaryDir cfgHome;                                  // settings live in a throw-away folder: never read or write the real ones
+    qputenv("XDG_CONFIG_HOME", cfgHome.path().toLocal8Bit());
     QApplication app(argc, argv);
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QTemporaryDir tmp;
@@ -120,6 +123,7 @@ int main(int argc, char** argv) {
     w.goStep(0);
     waitPlan(w);
     const double fullW = w.lastPlan().nx;  // grid columns with the full drawing
+    const int pBeforeSel = w.pageCount();
     auto* sel = w.findChild<QPushButton*>();  // not used; selection is driven by mouse on the canvas
     Q_UNUSED(sel);
     for (auto* b : w.findChildren<QPushButton*>()) if (b->text() == QObject::tr("框选区域")) b->setChecked(true);
@@ -141,7 +145,7 @@ int main(int argc, char** argv) {
         CHECK(b.trimmed().endsWith("%%EOF"), "PDF still ends with a valid trailer after the print-scaling update");
     }
     w.undo(); waitPlan(w);
-    CHECK(!w.state().hasSel && w.pageCount() == p0, "undo clears selection");
+    CHECK(!w.state().hasSel && w.pageCount() == pBeforeSel, "undo clears selection");
 
     // --- rotate / mirror ---
     w.edit([](State& s) { s.rot = 1; });
@@ -213,6 +217,9 @@ int main(int argc, char** argv) {
     const QString dz = QDir(data).filePath("DZ231101儿童中式背心__100码_纸宽门幅110cm_.plt");
     CHECK(load(w, dz), "import file with paper frame");
     waitPlan(w);
+    CHECK(w.state().ignoreFrame && w.frameRemoved() == 2, "「忽略纸张边框」 is on by default and removes the frame");
+    w.edit([](State& s) { s.ignoreFrame = false; });
+    waitPlan(w);
     const int withFrame = w.pageCount();
     const int linesBefore = w.workLineCount();
     CHECK(w.state().alignColor == QColor("#2563EB"), "alignment marks default to blue");
@@ -220,6 +227,85 @@ int main(int argc, char** argv) {
     waitPlan(w);
     CHECK(w.frameRemoved() == 2 && w.workLineCount() == linesBefore - 2, "「忽略纸张边框」 removes both frame lines from the drawing");
     CHECK(w.pageCount() <= withFrame, "ignoring the paper frame never adds pages");
+
+    // --- parameter defaults + click-to-edit boxes ---
+    {
+        State def;
+        CHECK(def.overlap == 10 && def.margin == 0 && def.lineWidth == 0.1 && def.calibCm == 5, "defaults: 重叠区 10 mm, 页边距 0 mm, 线宽 0.1 mm, 校准框 5 cm");
+        CHECK(def.ignoreFrame && !def.fileTag, "defaults: 忽略纸张边框 on, 页码旁附加文件名 off");
+        MainWindow w2;
+        w2.show();
+        pump(50);
+        CHECK(w2.state().margin == 0 && w2.state().ignoreFrame && !w2.state().fileTag, "new window starts with the new defaults");
+        QList<ClickSpinBox*> spins;     // (no Q_OBJECT in the header-only widget: qobject_cast would match every QDoubleSpinBox)
+        for (auto* d : w2.findChildren<QDoubleSpinBox*>()) if (auto* c = dynamic_cast<ClickSpinBox*>(d)) spins << c;
+        CHECK(spins.size() == 4, "overlap / margin / line width / calibration boxes are click-to-edit");
+        for (auto* sp : spins) {
+            CHECK(sp->locked(), "box starts locked");
+            const double before = sp->value();
+            QWheelEvent we(QPointF(5, 5), QPointF(5, 5), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(sp, &we);
+            QApplication::sendEvent(sp->editor(), &we);
+            QTest::keyClick(sp, Qt::Key_Up);
+            CHECK(sp->value() == before, "wheel / keys / stepping do not change a locked box");
+            QTest::mouseClick(sp->editor(), Qt::LeftButton);
+            CHECK(!sp->locked(), "a click unlocks the box for editing");
+            sp->lock();
+        }
+        ClickSpinBox* ov = spins.isEmpty() ? nullptr : spins.first();
+        if (ov) {
+            QTest::mouseClick(ov->editor(), Qt::LeftButton);
+            ov->editor()->selectAll();
+            QTest::keyClicks(ov->editor(), "12");
+            QTest::keyClick(ov->editor(), Qt::Key_Return);
+            pump(50);
+            CHECK(ov->locked(), "box locks again after editing");
+        }
+    }
+    // --- hand-set blank pages ---
+    {
+        MainWindow w3;
+        w3.show();
+        CHECK(load(w3, dz), "import for blank pages");
+        waitPlan(w3);
+        w3.edit([](State& s) { s.paper = "A4"; s.autoOrient = false; s.landscape = true; s.overview = false; });
+        waitPlan(w3);
+        const int pages = w3.pageCount(), eff = w3.lastPlan().effective;
+        int pick = -1;
+        for (int i = 0; i < w3.lastPlan().meta.size(); ++i) if (!w3.lastPlan().meta[i].empty) { pick = i; break; }
+        CHECK(pages >= 2 && pick >= 0, "multi-page drawing for the blank-page test");
+        if (pick >= 0) {
+            w3.blankPages({pick}, true);
+            waitPlan(w3);
+            CHECK(w3.state().blanked.size() == 1, "page recorded as hand-set blank");
+            CHECK(w3.pageCount() == pages && w3.lastPlan().effective == eff - 1, "blank page stays in the PDF but is no longer an effective page");
+            CHECK(w3.lastPlan().meta[pick].manual, "meta marks it as manual blank");
+            w3.undo();
+            waitPlan(w3);
+            CHECK(w3.state().blanked.isEmpty() && w3.lastPlan().effective == eff, "undo restores the page");
+            w3.blankPages({pick}, true);
+            waitPlan(w3);
+            w3.blankPages({pick}, false);
+            waitPlan(w3);
+            CHECK(w3.state().blanked.isEmpty() && w3.lastPlan().effective == eff, "「恢复内容」 brings the pattern back");
+            w3.blankPages({pick}, true);
+            waitPlan(w3);
+            w3.edit([](State& s) { s.rot = 1; });
+            waitPlan(w3);
+            CHECK(w3.state().blanked.isEmpty(), "rotating the drawing clears hand-set blanks");
+            const QByteArray shots = qgetenv("GUI_SHOTS");      // optional: screenshots for a visual check
+            if (!shots.isEmpty()) {
+                w3.resize(1400, 900);
+                w3.edit([](State& s) { s.rot = 0; });
+                waitPlan(w3);
+                w3.goStep(1); waitPlan(w3); pump(300);
+                w3.grab().save(QString::fromLocal8Bit(shots) + "/layout.png");
+                w3.blankPages({pick}, true); waitPlan(w3);
+                w3.goStep(2); pump(500);
+                w3.grab().save(QString::fromLocal8Bit(shots) + "/preview.png");
+            }
+        }
+    }
 
     std::cout << (fails ? "GUI TEST FAILED: " + std::to_string(fails) : std::string("GUI ALL PASSED")) << "\n";
     return fails ? 1 : 0;
