@@ -40,6 +40,9 @@
 #include "BatchWidgets.h"
 #include "MainWindow.h"
 #include "Widgets.h"
+#ifdef PLT_WITH_WM
+#include "Stamp.h"
+#endif
 
 namespace {
 
@@ -428,9 +431,15 @@ QWidget* MainWindow::buildBatchExportPanel() {
     bu_.expOpen = plainButton(tr("打开输出文件夹"));
     bu_.expCsv = plainButton(tr("导出报告（CSV）"));
     bu_.expRetry = plainButton(tr("仅重试失败项"));
+    bu_.expStamp = plainButton(tr("给导出的 PDF 添加水印"));
+    bu_.expStamp->setToolTip(tr("一键添加水印（矢量轮廓写入页面内容，WPS/Acrobat 的「删除水印」认不出）。按住 Shift 点击可重新设置水印。"));
     l->addWidget(bu_.expOpen);
     l->addWidget(bu_.expCsv);
     l->addWidget(bu_.expRetry);
+    l->addWidget(bu_.expStamp);
+#ifndef PLT_WITH_WM
+    bu_.expStamp->hide();
+#endif
     l->addWidget(noteLabel(tr("PDF 为 1:1 实际尺寸，打印时请选择【实际大小 / 100%】，切勿选择【适应页面】。")));
     l->addStretch(1);
     bu_.expBack = plainButton(tr("返回逐一预览"));
@@ -466,6 +475,13 @@ QWidget* MainWindow::buildBatchExportPanel() {
         else notify(tr("导出报告"), tr("无法写入该文件。"));
     });
     connect(bu_.expRetry, &QPushButton::clicked, this, [this] { batchStartExport(true); });
+#ifdef PLT_WITH_WM
+    connect(bu_.expStamp, &QPushButton::clicked, this, [this] {
+        QStringList outs;
+        for (const auto& r : results_) if (r.err.isEmpty() && !r.cancelled && !r.outPath.isEmpty() && QFileInfo::exists(r.outPath)) outs << r.outPath;
+        runStampFlow(outs, this, QApplication::keyboardModifiers() & Qt::ShiftModifier);
+    });
+#endif
     connect(bu_.expBack, &QPushButton::clicked, this, [this] { goBatchStep(3); });
     return w;
 }
@@ -1371,6 +1387,7 @@ void MainWindow::syncOptsUi() {
     bu_.expOpen->setEnabled(!exporting_ && anyDone);
     bu_.expCsv->setEnabled(!exporting_ && (anyDone || anyFailed));
     bu_.expRetry->setEnabled(!exporting_ && anyFailed);
+    bu_.expStamp->setEnabled(!exporting_ && anyDone);
     bu_.expBack->setEnabled(!exporting_);
 }
 

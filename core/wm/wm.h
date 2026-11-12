@@ -2,7 +2,8 @@
 // Scope of this version: (1) stand-alone "artifact" objects (a Form XObject stamped on every page),
 // (2) flattened diagonal text watermarks whose overlap with pattern lines was baked into mixed colours,
 // (3) shop information banners drawn in the pattern's own layer (contact text on a coloured block, icons, QR code).
-// Bitmap pages are reported but never touched.
+// (4) full-page images with a watermark of one colour composited over a black/grey pattern (solved per pixel, see bitmap.h);
+// other bitmap pages are reported but never touched.
 #pragma once
 #include <filesystem>
 #include <map>
@@ -39,6 +40,7 @@ struct Finding {
     double alpha = 0;              // FlatText: fitted mixing ratio
     std::vector<double> lightColour;                       // FlatText: colour of the watermark glyphs over white
     std::map<std::string, std::vector<double>> restore;    // FlatText: blended colour key -> original colour
+    std::vector<double> bitmapModel;                       // Bitmap (removable): watermark colour model, see bmp::Model::pack
 };
 
 struct Report {
@@ -53,6 +55,8 @@ struct RemoveResult {
     bool ok = false;
     std::string error;
     int formsRemoved = 0, textBlocksRemoved = 0, fillsRemoved = 0, coloursRestored = 0, blockItemsRemoved = 0;
+    int imagesCleaned = 0;          // full-page images the coloured watermark was taken out of
+    long pixelsChanged = 0;
 };
 
 Report analyze(const std::filesystem::path& in);
@@ -96,16 +100,39 @@ TextResult removeText(const std::filesystem::path& in, const std::filesystem::pa
 
 // ---- vector preview (no rasteriser needed: these PDFs consist of strokes, fills and text) ----
 struct DrawItem {
-    enum Kind { Stroke, Fill, Text, ImageBox } kind = Stroke;
+    enum Kind { Stroke, Fill, Text, ImageBox, Image } kind = Stroke;   // Image: decoded pixels (iw x ih RGB), placed on pts[0..3] = image corners (0,0),(1,0),(1,1),(0,1)
     std::vector<std::pair<double, double>> pts;   // page points, origin top-left, y down (Text: pts[0] = baseline start)
     float r = 0, g = 0, b = 0, a = 1;
     double lineWidth = 0.5;
     std::string text;                              // Text, UTF-8 (empty when the font has no usable mapping)
     double size = 0, angle = 0;                    // Text: font size in points, rotation in radians (counter-clockwise on screen)
     int glyphs = 0;                                // Text: number of characters shown
+    int iw = 0, ih = 0;                            // Image: preview pixels (downsampled), top row first
+    std::vector<unsigned char> rgb;
 };
 struct PageDrawing { bool ok = false; std::string error; double w = 0, h = 0; int pageCount = 0; std::vector<DrawItem> items; };
 PageDrawing drawPage(const std::filesystem::path& in, int page /*1-based*/);
+
+// ---- adding our own watermark ----
+// The stamp is drawn as plain filled outlines (text already converted to curves by the caller) and written straight into each
+// page's content stream, cut into many small pieces that are spread between the page's own drawing operations.  It uses no
+// annotation, no Form XObject, no /Artifact or /Watermark marked content, no optional-content layer and no PieceInfo - the
+// markers PDF editors (WPS, Acrobat) use to recognise and delete "a watermark".  Blend mode Multiply keeps every line under it
+// visible, whatever the drawing order.
+struct StampPath {
+    std::string ops;               // per segment: 'M' (x y), 'L' (x y), 'C' (x1 y1 x2 y2 x3 y3), 'Z'
+    std::vector<double> pts;       // points, y up, relative to the stamp centre
+};
+struct StampSpec {
+    std::vector<StampPath> pieces; // e.g. one per character / per text line
+    double w = 0, h = 0;           // stamp size in points (unrotated)
+    float r = 0.85f, g = 0.2f, b = 0.25f;
+    double opacity = 0.25;         // 0..1
+    double angleDeg = 30;          // counter-clockwise, as the page is seen
+    double gapX = 40, gapY = 40;   // space between stamps in points
+};
+struct StampResult { bool ok = false; std::string error; int pages = 0, units = 0; };
+StampResult addWatermark(const std::filesystem::path& in, const std::filesystem::path& out, const StampSpec& spec);
 
 // ---- batch: one recipe applied to many files of the same watermark type ----
 constexpr int kMaxBatchFiles = 20;
@@ -139,7 +166,7 @@ struct FileResult {
     long strokesBefore = 0, strokesAfter = 0, strokesExpected = 0;
     bool verified = false;
     bool nothingToDo = false;      // the file simply contains nothing the recipe removes (not an error)
-    int removedTotal() const { return detected.formsRemoved + detected.textBlocksRemoved + detected.fillsRemoved + detected.blockItemsRemoved + textsRemoved + shapesRemoved; }
+    int removedTotal() const { return detected.formsRemoved + detected.textBlocksRemoved + detected.fillsRemoved + detected.blockItemsRemoved + detected.imagesCleaned + textsRemoved + shapesRemoved; }
 };
 // Applies the recipe to one file.  With recipe.verify the output is deleted again when the stroke count is not what it should be.
 // `alsoRemove`: indices (into analyze(in).findings) of "需确认" findings the user ticked for this very file.

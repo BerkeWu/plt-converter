@@ -179,6 +179,36 @@ int main(int argc, char** argv) {
         auto rr = wm::remove(dir / "E_bitmap.pdf", tmp("wm_E_out.pdf"));
         CHECK(!rr.ok);
     }
+    // K: coloured (pink) watermark composited into a full-page image over a black pattern: solved per pixel
+    {
+        auto r = wm::analyze(dir / "K_bitmap_colour.pdf");
+        CHECK(r.ok && r.findings.size() == 1);
+        if (!r.findings.empty()) { CHECK(r.findings[0].kind == wm::Kind::Bitmap); CHECK(r.findings[0].tier == wm::Tier::High); }
+        auto o = tmp("wm_K_out.pdf");
+        auto rr = wm::remove(dir / "K_bitmap_colour.pdf", o);
+        CHECK(rr.ok && rr.imagesCleaned == 1 && rr.pixelsChanged > 10000);
+        auto before = wm::drawPage(dir / "K_bitmap_colour.pdf", 1), after = wm::drawPage(o, 1);
+        auto stats = [](const wm::PageDrawing& d, long& tinted, long& dark) {
+            tinted = dark = 0;
+            for (auto& it : d.items) if (it.kind == wm::DrawItem::Image)
+                for (size_t i = 0; i + 2 < it.rgb.size(); i += 3) {
+                    const int r = it.rgb[i], g = it.rgb[i + 1], b = it.rgb[i + 2];
+                    if (std::max({r, g, b}) - std::min({r, g, b}) > 25) ++tinted;
+                    if (std::max({r, g, b}) < 110) ++dark;
+                }
+        };
+        long t0, d0, t1, d1; stats(before, t0, d0); stats(after, t1, d1);
+        CHECK(t0 > 20000 && t1 < t0 / 100);              // the pink is gone
+        CHECK(d1 >= d0 * 0.97 && d1 <= d0 * 1.03 + 50);   // the black lines (also those under the watermark) are all still there
+        CHECK(!wm::analyze(o).hasRemovable());
+        wm::Recipe rcK; rcK.signature = wm::signatureOf(r);
+        auto fr = wm::applyRecipe(dir / "K_bitmap_colour.pdf", tmp("wm_K_rec.pdf"), rcK);   // the batch path, with the integrity check
+        CHECK(fr.ok && fr.verified && fr.detected.imagesCleaned == 1 && fr.removedTotal() == 1);
+        // a pattern drawn in colour (blue lines) under a grey watermark must NOT be touched
+        auto e = wm::analyze(dir / "E_bitmap.pdf");
+        bool why = false; for (auto& f : e.findings) for (auto& ev : f.evidence) if (ev.find("彩色线条") != std::string::npos) why = true;
+        CHECK(why);
+    }
     // batch: grouping, recipes, integrity check
     {
         std::vector<wm::Report> reps;

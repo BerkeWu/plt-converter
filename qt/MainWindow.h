@@ -111,7 +111,7 @@ struct BatchUi {
     // step 5: export
     QRadioButton *outSource = nullptr, *outCustom = nullptr;
     QLabel *outDirShow = nullptr, *expSummary = nullptr, *expTime = nullptr;
-    QPushButton *outChoose = nullptr, *expStart = nullptr, *expPause = nullptr, *expCancel = nullptr, *expOpen = nullptr, *expCsv = nullptr, *expRetry = nullptr, *expBack = nullptr;
+    QPushButton *outChoose = nullptr, *expStart = nullptr, *expPause = nullptr, *expCancel = nullptr, *expOpen = nullptr, *expCsv = nullptr, *expRetry = nullptr, *expBack = nullptr, *expStamp = nullptr;
     QSpinBox* concurrency = nullptr;
     QProgressBar* expBar = nullptr;
 };

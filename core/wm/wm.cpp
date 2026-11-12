@@ -1,7 +1,9 @@
 #include "wm.h"
+#include "bitmap.h"
 
 #include <qpdf/Buffer.hh>
 #include <qpdf/Pl_Buffer.hh>
+#include <qpdf/Pl_Flate.hh>
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFObjectHandle.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
@@ -9,18 +11,28 @@
 #include <qpdf/QPDFWriter.hh>
 
 #include <algorithm>
+#include <future>
+#include <functional>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 
 namespace wm {
 namespace {
+// Operator-name comparison without strlen(): the literal's length is known at compile time (this was a third of the analysis time)
+// zlib level 6 made writing the result a third of the whole run time; level 3 is ~3x faster and only a few percent larger.
+void fastDeflate() { static std::once_flag f; std::call_once(f, [] { Pl_Flate::setCompressionLevel(3); }); }
+
+template <size_t N> inline bool isOp(const std::string& s, const char (&lit)[N]) { return s.size() == N - 1 && std::memcmp(s.data(), lit, N - 1) == 0; }
+
 
 constexpr double kPi = 3.14159265358979323846;
 using Mat = std::array<double, 6>;
@@ -84,7 +96,7 @@ struct Arg {
 struct Instr {
     std::vector<Arg> a;
     std::string op;
-    bool isInline = false;            // op == "BI": a[0].raw holds the whole inline image (BI ... ID data EI)
+    bool isInline = false;            // op is "BI": a[0].raw holds the whole inline image (BI ... ID data EI)
 };
 
 class Tokenizer {
@@ -109,7 +121,7 @@ public:
             while (p_ < e_ && !isWs(*p_) && !isDelim(*p_)) ++p_;
             if (p_ == st) { ++p_; continue; }
             Instr i; i.op.assign(st, p_ - st);
-            if (i.op == "BI") {
+            if (isOp(i.op, "BI")) {
                 const char* end = inlineImageEnd(st);
                 Arg a; a.k = Arg::Other; a.raw.assign(st, end - st);
                 i.isInline = true; i.a.push_back(std::move(a));
@@ -272,7 +284,7 @@ bool numeric(Instr& i, Colour& c) {
     for (auto& o : i.a) { if (!o.isNumber()) return false; c.push_back(o.getNumericValue()); }
     return !c.empty();
 }
-bool isFillColourOp(const std::string& op) { return op == "g" || op == "rg" || op == "k" || op == "sc" || op == "scn"; }
+bool isFillColourOp(const std::string& op) { return isOp(op, "g") || isOp(op, "rg") || isOp(op, "k") || isOp(op, "sc") || isOp(op, "scn"); }
 Mat numMat(Instr& i) {
     Mat m{1, 0, 0, 1, 0, 0};
     if (i.a.size() == 6) for (int k = 0; k < 6; ++k) m[k] = i.a[k].getNumericValue();
@@ -316,7 +328,7 @@ bool looksLikeContact(const std::string& s) {
 std::string collectStrings(std::vector<Instr>& v) {
     std::string s;
     for (auto& i : v) {
-        if (i.op != "Tj" && i.op != "TJ" && i.op != "'" && i.op != "\"") continue;
+        if (!isOp(i.op, "Tj") && !isOp(i.op, "TJ") && !isOp(i.op, "'") && !isOp(i.op, "\"")) continue;
         for (auto& o : i.a) {
             if (o.isString()) { s += o.getStringValue(); s += ' '; }
             else if (o.isArray()) for (int k = 0; k < o.getArrayNItems(); ++k) { auto e = o.getArrayItem(k); if (e.isString()) s += e.getStringValue(); }
@@ -433,19 +445,19 @@ std::string decodeFormText(QPDFObjectHandle x, int depth = 0) {
         QPDFObjectHandle xo = res.isDictionary() ? res.getKey("/XObject") : QPDFObjectHandle::newNull();
         std::map<std::string, FontMap> fm; FontMap cur;
         for (auto& i : ins) {
-            if (i.op == "Tf" && !i.a.empty() && i.a[0].isName() && fonts.isDictionary()) {
+            if (isOp(i.op, "Tf") && !i.a.empty() && i.a[0].isName() && fonts.isDictionary()) {
                 const std::string nm = i.a[0].getName();
                 auto it = fm.find(nm);
                 if (it == fm.end()) it = fm.emplace(nm, loadFont(fonts.getKey(nm))).first;
                 cur = it->second;
-            } else if ((i.op == "Tj" || i.op == "TJ") && cur.has) {
+            } else if ((isOp(i.op, "Tj") || isOp(i.op, "TJ")) && cur.has) {
                 for (auto& o : i.a) {
                     if (o.isString()) out += decodeShown(o.getStringValue(), cur);
                     else if (o.isArray()) for (int k = 0; k < o.getArrayNItems(); ++k) if (o.getArrayItem(k).isString()) out += decodeShown(o.getArrayItem(k).getStringValue(), cur);
                 }
                 out += ' ';
-            } else if (i.op == "T*" || i.op == "TD" || i.op == "'") out += ' ';
-            else if (i.op == "Do" && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) out += decodeFormText(xo.getKey(i.a[0].getName()), depth + 1);
+            } else if (isOp(i.op, "T*") || isOp(i.op, "TD") || isOp(i.op, "'")) out += ' ';
+            else if (isOp(i.op, "Do") && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) out += decodeFormText(xo.getKey(i.a[0].getName()), depth + 1);
         }
     } catch (...) {}
     return out;
@@ -477,28 +489,28 @@ FormFacts scanForm(std::vector<Instr>& v, QPDFObjectHandle formRes) {
     Mat tm{1, 0, 0, 1, 0, 0}; bool inBT = false, gotAngle = false;
     for (auto& i : v) {
         const std::string& op = i.op;
-        if (op == "q") { st.push_back(g); strokeSt.push_back(stroke); }
-        else if (op == "Q") { if (!st.empty()) { g = st.back(); st.pop_back(); stroke = strokeSt.back(); strokeSt.pop_back(); } }
-        else if (op == "cm") g.ctm = mul(numMat(i), g.ctm);
-        else if (op == "gs" && !i.a.empty() && i.a[0].isName()) { g.alpha = extAlpha(formRes, i.a[0].getName()); F.alpha = std::min(F.alpha, g.alpha); }
+        if (isOp(op, "q")) { st.push_back(g); strokeSt.push_back(stroke); }
+        else if (isOp(op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); stroke = strokeSt.back(); strokeSt.pop_back(); } }
+        else if (isOp(op, "cm")) g.ctm = mul(numMat(i), g.ctm);
+        else if (isOp(op, "gs") && !i.a.empty() && i.a[0].isName()) { g.alpha = extAlpha(formRes, i.a[0].getName()); F.alpha = std::min(F.alpha, g.alpha); }
         else if (isFillColourOp(op)) { Colour c; if (numeric(i, c)) g.fill = c; }
-        else if (op == "G" || op == "RG" || op == "K" || op == "SC" || op == "SCN") { Colour c; if (numeric(i, c)) stroke = c; }
-        else if (op == "BT") { inBT = true; tm = {1, 0, 0, 1, 0, 0}; }
-        else if (op == "ET") inBT = false;
-        else if (op == "Tm" && i.a.size() == 6) tm = numMat(i);
-        else if (op == "Tj" || op == "TJ" || op == "'" || op == "\"") {
+        else if (isOp(op, "G") || isOp(op, "RG") || isOp(op, "K") || isOp(op, "SC") || isOp(op, "SCN")) { Colour c; if (numeric(i, c)) stroke = c; }
+        else if (isOp(op, "BT")) { inBT = true; tm = {1, 0, 0, 1, 0, 0}; }
+        else if (isOp(op, "ET")) inBT = false;
+        else if (isOp(op, "Tm") && i.a.size() == 6) tm = numMat(i);
+        else if (isOp(op, "Tj") || isOp(op, "TJ") || isOp(op, "'") || isOp(op, "\"")) {
             F.text = true;
             if (inBT && !gotAngle) {
                 Mat m = mul(tm, g.ctm);
                 F.angle = std::atan2(m[1], m[0]) * 180 / kPi; F.hasAngle = true; gotAngle = true;
             }
         }
-        else if (op == "f" || op == "F" || op == "f*" || op == "B" || op == "B*" || op == "b" || op == "b*") {
+        else if (isOp(op, "f") || isOp(op, "F") || isOp(op, "f*") || isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*")) {
             const bool strokes = (op[0] == 'B' || op[0] == 'b');
             if (!isWhite(g.fill) || (strokes && !isWhite(stroke))) F.other = true;
         }
-        else if (op == "S" || op == "s") { if (!isWhite(stroke)) F.other = true; }
-        else if (op == "Do" || op == "BI" || op == "sh") F.other = true;
+        else if (isOp(op, "S") || isOp(op, "s")) { if (!isWhite(stroke)) F.other = true; }
+        else if (isOp(op, "Do") || isOp(op, "BI") || isOp(op, "sh")) F.other = true;
     }
     return F;
 }
@@ -514,30 +526,30 @@ PageInfo tracePage(QPDFPageObjectHelper& page, std::vector<Instr>& ins, std::map
     bool inBT = false, shown = false; int artDepth = 0;
     for (auto& i : ins) {
         const std::string& op = i.op;
-        if (op == "q") st.push_back(g);
-        else if (op == "Q") { if (!st.empty()) { g = st.back(); st.pop_back(); } }
-        else if (op == "cm") g.ctm = mul(numMat(i), g.ctm);
-        else if (op == "gs" && !i.a.empty() && i.a[0].isName()) g.alpha = extAlpha(res, i.a[0].getName());
+        if (isOp(op, "q")) st.push_back(g);
+        else if (isOp(op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); } }
+        else if (isOp(op, "cm")) g.ctm = mul(numMat(i), g.ctm);
+        else if (isOp(op, "gs") && !i.a.empty() && i.a[0].isName()) g.alpha = extAlpha(res, i.a[0].getName());
         else if (isFillColourOp(op)) { Colour c; if (numeric(i, c)) g.fill = c; }
-        else if (op == "BDC" || op == "BMC") {
+        else if (isOp(op, "BDC") || isOp(op, "BMC")) {
             bool art = !i.a.empty() && i.a[0].isName() && i.a[0].getName() == "/Artifact";
             marks.push_back(art); if (art) ++artDepth;
-        } else if (op == "EMC") { if (!marks.empty()) { if (marks.back()) --artDepth; marks.pop_back(); } }
-        else if (op == "BT") { inBT = true; shown = false; tm = {1, 0, 0, 1, 0, 0}; }
-        else if (op == "ET") inBT = false;
-        else if (op == "Tm" && i.a.size() == 6) tm = numMat(i);
-        else if (op == "Tf" && i.a.size() == 2) fsize = i.a[1].getNumericValue();
-        else if ((op == "Tj" || op == "TJ") && inBT && !shown) {
+        } else if (isOp(op, "EMC")) { if (!marks.empty()) { if (marks.back()) --artDepth; marks.pop_back(); } }
+        else if (isOp(op, "BT")) { inBT = true; shown = false; tm = {1, 0, 0, 1, 0, 0}; }
+        else if (isOp(op, "ET")) inBT = false;
+        else if (isOp(op, "Tm") && i.a.size() == 6) tm = numMat(i);
+        else if (isOp(op, "Tf") && i.a.size() == 2) fsize = i.a[1].getNumericValue();
+        else if ((isOp(op, "Tj") || isOp(op, "TJ")) && inBT && !shown) {
             shown = true;
             Mat m = mul(tm, g.ctm);
             TextBlock tb; tb.angle = (int)std::lround(std::atan2(m[1], m[0]) * 180 / kPi);
             tb.angle = ((tb.angle % 360) + 360) % 360;
             tb.size = std::round(fsize * std::hypot(m[0], m[1]) * 10) / 10;
             tb.col = g.fill; pi.tbs.push_back(tb);
-        } else if (op == "f" || op == "F" || op == "f*" || op == "B" || op == "B*" || op == "b" || op == "b*") {
+        } else if (isOp(op, "f") || isOp(op, "F") || isOp(op, "f*") || isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*")) {
             std::string k = ckey(g.fill); pi.fills[k]++; pi.fillCols[k] = g.fill; ++pi.pathOps;
-        } else if (op == "S" || op == "s") ++pi.pathOps;
-        else if (op == "Do" && !i.a.empty() && i.a[0].isName()) {
+        } else if (isOp(op, "S") || isOp(op, "s")) ++pi.pathOps;
+        else if (isOp(op, "Do") && !i.a.empty() && i.a[0].isName()) {
             DoRec d; d.name = i.a[0].getName(); d.m = g.ctm; d.alpha = g.alpha; d.inArtifact = artDepth > 0;
             QPDFObjectHandle x = xo.isDictionary() ? xo.getKey(d.name) : QPDFObjectHandle::newNull();
             if (x.isStream()) {
@@ -795,8 +807,8 @@ bool fillOnlyForm(QPDFObjectHandle x) {
         bool fill = false;
         for (auto& i : fins) {
             const std::string& o = i.op;
-            if (o == "f" || o == "F" || o == "f*") fill = true;
-            else if (o == "S" || o == "s" || o == "B" || o == "B*" || o == "b" || o == "b*" || o == "Tj" || o == "TJ" || o == "Do" || o == "BI" || o == "sh" || o == "'" || o == "\"") return false;
+            if (isOp(o, "f") || isOp(o, "F") || isOp(o, "f*")) fill = true;
+            else if (isOp(o, "S") || isOp(o, "s") || isOp(o, "B") || isOp(o, "B*") || isOp(o, "b") || isOp(o, "b*") || isOp(o, "Tj") || isOp(o, "TJ") || isOp(o, "Do") || isOp(o, "BI") || isOp(o, "sh") || isOp(o, "'") || isOp(o, "\"")) return false;
         }
         return fill;
     } catch (...) { return false; }
@@ -824,41 +836,41 @@ std::vector<Ev> traceEvents(QPDFPageObjectHelper& page, std::vector<Instr>& ins,
     for (size_t k = 0; k < ins.size(); ++k) {
         Instr& i = ins[k];
         const std::string& op = i.op;
-        if (op == "q") st.push_back(g);
-        else if (op == "Q") { if (!st.empty()) { g = st.back(); st.pop_back(); } }
-        else if (op == "cm") g.ctm = mul(numMat(i), g.ctm);
+        if (isOp(op, "q")) st.push_back(g);
+        else if (isOp(op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); } }
+        else if (isOp(op, "cm")) g.ctm = mul(numMat(i), g.ctm);
         else if (isFillColourOp(op)) { Colour c; if (numeric(i, c)) g.fill = c; }
-        else if (op == "m" || op == "l") { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); }
-        else if (op == "c") { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); pt(num(i, 2), num(i, 3)); pt(num(i, 4), num(i, 5)); }
-        else if (op == "v" || op == "y") { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); pt(num(i, 2), num(i, 3)); }
-        else if (op == "re") {
+        else if (isOp(op, "m") || isOp(op, "l")) { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); }
+        else if (isOp(op, "c")) { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); pt(num(i, 2), num(i, 3)); pt(num(i, 4), num(i, 5)); }
+        else if (isOp(op, "v") || isOp(op, "y")) { if (pathFirst == SIZE_MAX) pathFirst = k; pt(num(i, 0), num(i, 1)); pt(num(i, 2), num(i, 3)); }
+        else if (isOp(op, "re")) {
             if (pathFirst == SIZE_MAX) pathFirst = k;
             const double x = num(i, 0), y = num(i, 1), w = num(i, 2), h = num(i, 3);
             pt(x, y); pt(x + w, y); pt(x + w, y + h); pt(x, y + h);
         }
-        else if (op == "h") { if (pathFirst == SIZE_MAX) pathFirst = k; }
-        else if (op == "W" || op == "W*") pathClip = true;
-        else if (op == "n") { path = Box(); pathFirst = SIZE_MAX; pathClip = false; curPts.clear(); }
-        else if (op == "f" || op == "F" || op == "f*" || op == "S" || op == "s" || op == "B" || op == "B*" || op == "b" || op == "b*") {
+        else if (isOp(op, "h")) { if (pathFirst == SIZE_MAX) pathFirst = k; }
+        else if (isOp(op, "W") || isOp(op, "W*")) pathClip = true;
+        else if (isOp(op, "n")) { path = Box(); pathFirst = SIZE_MAX; pathClip = false; curPts.clear(); }
+        else if (isOp(op, "f") || isOp(op, "F") || isOp(op, "f*") || isOp(op, "S") || isOp(op, "s") || isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*")) {
             if (pathFirst != SIZE_MAX && path.valid()) {
                 Ev e; e.type = Ev::Paint; e.first = pathFirst; e.last = k; e.box = path; e.clipped = pathClip;
-                e.stroke = !(op == "f" || op == "F" || op == "f*");
+                e.stroke = !(isOp(op, "f") || isOp(op, "F") || isOp(op, "f*"));
                 e.whiteFill = isWhite(g.fill);
                 e.pts = curPts;
                 evs.push_back(e);
             }
             path = Box(); pathFirst = SIZE_MAX; pathClip = false; curPts.clear();
         }
-        else if (op == "BT") { tm = tlm = {1, 0, 0, 1, 0, 0}; }
-        else if (op == "Tm" && i.a.size() == 6) tm = tlm = numMat(i);
-        else if (op == "Td") { tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
-        else if (op == "TD") { leading = -num(i, 1); tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
-        else if (op == "TL") leading = num(i, 0);
-        else if (op == "T*") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; }
-        else if (op == "Tf" && i.a.size() == 2) fsize = i.a[1].getNumericValue();
-        else if (op == "Tj" || op == "TJ") showText(k, i);
-        else if (op == "'" || op == "\"") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; showText(k, i); }
-        else if (op == "Do" && !i.a.empty() && i.a[0].isName()) {
+        else if (isOp(op, "BT")) { tm = tlm = {1, 0, 0, 1, 0, 0}; }
+        else if (isOp(op, "Tm") && i.a.size() == 6) tm = tlm = numMat(i);
+        else if (isOp(op, "Td")) { tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+        else if (isOp(op, "TD")) { leading = -num(i, 1); tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+        else if (isOp(op, "TL")) leading = num(i, 0);
+        else if (isOp(op, "T*")) { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; }
+        else if (isOp(op, "Tf") && i.a.size() == 2) fsize = i.a[1].getNumericValue();
+        else if (isOp(op, "Tj") || isOp(op, "TJ")) showText(k, i);
+        else if (isOp(op, "'") || isOp(op, "\"")) { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; showText(k, i); }
+        else if (isOp(op, "Do") && !i.a.empty() && i.a[0].isName()) {
             QPDFObjectHandle x = xo.isDictionary() ? xo.getKey(i.a[0].getName()) : QPDFObjectHandle::newNull();
             if (!x.isStream()) continue;
             auto sub = x.getDict().getKey("/Subtype");
@@ -953,14 +965,14 @@ void detectBlocks(Analysis& A) {
                 else if (n >= 3 && inside(e.x, e.y) && steady(e, staticNeed)) { kill = true; ++statics; }
                 if (kill) {   // the next text-show must not depend on this one's advance
                     const size_t nx = e.first + 1;
-                    if (nx < A.ins[p].size()) { const std::string& o = A.ins[p][nx].op; if (o == "Tj" || o == "TJ" || o == "'" || o == "\"") kill = false; }
+                    if (nx < A.ins[p].size()) { const std::string& o = A.ins[p][nx].op; if (isOp(o, "Tj") || isOp(o, "TJ") || isOp(o, "'") || isOp(o, "\"")) kill = false; }
                 }
             } else if (e.type == Ev::Paint) kill = !e.stroke && !e.clipped && inside(e.box.cx(), e.box.cy());
             else if (e.type == Ev::DoImg || e.type == Ev::DoFillForm) kill = inside(e.box.cx(), e.box.cy());
             if (!kill) continue;
             for (size_t t = e.first; t <= e.last; ++t) {
                 const std::string& o = A.ins[p][t].op;
-                if (e.type == Ev::Paint && !(o == "m" || o == "l" || o == "c" || o == "v" || o == "y" || o == "re" || o == "h" || o == "f" || o == "F" || o == "f*")) continue;
+                if (e.type == Ev::Paint && !(isOp(o, "m") || isOp(o, "l") || isOp(o, "c") || isOp(o, "v") || isOp(o, "y") || isOp(o, "re") || isOp(o, "h") || isOp(o, "f") || isOp(o, "F") || isOp(o, "f*"))) continue;
                 A.bKill[p].push_back(t);
             }
             if (e.type == Ev::DoImg || e.type == Ev::DoFillForm) A.bNames[p].insert(e.name);
@@ -990,9 +1002,49 @@ void detectBitmap(Analysis& A) {
     int n = (int)A.pages.size(), big = 0;
     for (auto& p : A.pages) if (p.imgArea / p.pageArea >= 0.6) ++big;
     if (n == 0 || big < 0.5 * n) return;
-    Finding f; f.kind = Kind::Bitmap; f.tier = Tier::Unsupported; f.score = 100; f.pages = big;
-    f.label = "整页位图：水印已和纸样合成在图片里，无法安全去除";
+    Finding f; f.kind = Kind::Bitmap; f.pages = big;
     f.evidence.push_back(std::to_string(big) + "/" + std::to_string(n) + " 页被图片铺满");
+    // Can the watermark be separated by its colour?  Fit on up to three sample pages (first / middle / last image page).
+    std::vector<int> imgPages;
+    for (int p = 0; p < n; ++p) if (A.pages[p].imgArea / A.pages[p].pageArea >= 0.6) imgPages.push_back(p);
+    std::vector<int> sample{imgPages.front(), imgPages[imgPages.size() / 2], imgPages.back()};
+    sample.erase(std::unique(sample.begin(), sample.end()), sample.end());
+    std::vector<bmp::Image> imgs; std::string why; bool lossy = false;
+    for (int p : sample) {
+        for (auto& x : bmp::pageImages(A.pageObjs[p].getObjectHandle())) {
+            bmp::Image im; std::string w;
+            if (bmp::decode(x, im, &w)) { lossy |= im.lossy; imgs.push_back(std::move(im)); }
+            else if (why.empty()) why = w;
+            if (imgs.size() >= 3) break;
+        }
+        if (imgs.size() >= 3) break;
+    }
+    bmp::Model M;
+    if (!imgs.empty()) {
+        std::vector<const bmp::Image*> v; for (auto& im : imgs) v.push_back(&im);
+        M = bmp::fit(v, 2);
+        if (!M.ok) why = M.why;
+    } else if (why.empty()) why = "页面图片无法读取";
+    if (!M.ok) {
+        f.tier = Tier::Unsupported; f.score = 100;
+        f.label = "整页位图：水印已和纸样合成在图片里，无法安全去除";
+        f.evidence.push_back("原因：" + why);
+        A.rep.findings.push_back(f);
+        return;
+    }
+    int score = 40;
+    f.evidence.push_back("纸样和水印合成在整页图片里 +40");
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "水印是单一颜色（%.0f%% 的彩色像素同一色相） +25", 100 * M.hueShare); f.evidence.push_back(buf); score += 25;
+    f.evidence.push_back("纸样本身是黑白灰，可按颜色逐像素还原（被盖住的线条可恢复） +20"); score += 20;
+    if (big >= 0.8 * n) { score += 10; f.evidence.push_back("每页都有 +10"); }
+    if (!lossy) { score += 5; f.evidence.push_back("图片为无损压缩，像素准确 +5"); }
+    else f.evidence.push_back("图片为 JPEG 有损压缩：去除后可能留下极淡的痕迹");
+    std::snprintf(buf, sizeof buf, "（估计的水印覆盖：叠在白纸 %d 处、叠在线条 %d 处样本）", M.lightSamples, M.darkSamples); f.evidence.push_back(buf);
+    f.score = std::min(100, score); f.tier = tierFor(f.score);
+    f.objects = (int)imgs.size();
+    f.label = "整页位图里的彩色水印（按颜色逐像素去除）";
+    f.bitmapModel = M.pack();
     A.rep.findings.push_back(f);
 }
 
@@ -1046,13 +1098,14 @@ Report analyze(const std::filesystem::path& in) {
     QPDF pdf; return run(pdf, in).rep;
 }
 
+static const char* const kNothingToRemove = "没有可去除的水印";
 RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path& out, const std::vector<int>& alsoRemove) {
     RemoveResult R;
     QPDF pdf;
     Analysis A = run(pdf, in);
     if (!A.rep.ok) { R.error = A.rep.error; return R; }
     std::set<int> pick(alsoRemove.begin(), alsoRemove.end());
-    std::set<std::string> dropForms; const Finding* flat = nullptr; bool dropBlock = false;
+    std::set<std::string> dropForms; const Finding* flat = nullptr; bool dropBlock = false; const Finding* bitmap = nullptr;
     for (int i = 0; i < (int)A.rep.findings.size(); ++i) {
         auto& f = A.rep.findings[i];
         if (f.tier == Tier::Unsupported) continue;
@@ -1060,8 +1113,9 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
         if (f.kind == Kind::ArtifactObject) { dropForms.insert(f.formKey); for (auto& k : f.extraKeys) dropForms.insert(k); }
         if (f.kind == Kind::FlatText) flat = &f;
         if (f.kind == Kind::LayerBlock) dropBlock = true;
+        if (f.kind == Kind::Bitmap && !f.bitmapModel.empty()) bitmap = &f;
     }
-    if (dropForms.empty() && !flat && !dropBlock) { R.error = "没有可去除的水印"; return R; }
+    if (dropForms.empty() && !flat && !dropBlock && !bitmap) { R.error = kNothingToRemove; return R; }
     try {
         QPDFPageDocumentHelper doc(pdf);
         auto pages = doc.getAllPages();
@@ -1080,13 +1134,13 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                 GState g; std::vector<GState> st; std::vector<size_t> markStart;
                 for (size_t k = 0; k < ins.size(); ++k) {
                     auto& i = ins[k];
-                    if (i.op == "q") st.push_back(g);
-                    else if (i.op == "Q") { if (!st.empty()) { g = st.back(); st.pop_back(); } }
-                    else if (i.op == "cm") g.ctm = mul(numMat(i), g.ctm);
-                    else if (i.op == "gs" && !i.a.empty() && i.a[0].isName()) g.alpha = extAlpha(res, i.a[0].getName());
-                    else if (i.op == "BDC" || i.op == "BMC") markStart.push_back(k);
-                    else if (i.op == "EMC") { if (!markStart.empty()) markStart.pop_back(); }
-                    else if (i.op == "Do" && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) {
+                    if (isOp(i.op, "q")) st.push_back(g);
+                    else if (isOp(i.op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); } }
+                    else if (isOp(i.op, "cm")) g.ctm = mul(numMat(i), g.ctm);
+                    else if (isOp(i.op, "gs") && !i.a.empty() && i.a[0].isName()) g.alpha = extAlpha(res, i.a[0].getName());
+                    else if (isOp(i.op, "BDC") || isOp(i.op, "BMC")) markStart.push_back(k);
+                    else if (isOp(i.op, "EMC")) { if (!markStart.empty()) markStart.pop_back(); }
+                    else if (isOp(i.op, "Do") && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) {
                         QPDFObjectHandle x = xo.getKey(i.a[0].getName());
                         if (!x.isStream()) continue;
                         auto sub = x.getDict().getKey("/Subtype");
@@ -1107,23 +1161,23 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                             size_t ms = markStart.back(), me = k;
                             int depth = 0; bool simple = true;
                             for (size_t t = ms + 1; t < ins.size(); ++t) {
-                                if (ins[t].op == "EMC" && depth == 0) { me = t; break; }
-                                if (ins[t].op == "BDC" || ins[t].op == "BMC") ++depth;
-                                if (ins[t].op == "EMC") --depth;
+                                if (isOp(ins[t].op, "EMC") && depth == 0) { me = t; break; }
+                                if (isOp(ins[t].op, "BDC") || isOp(ins[t].op, "BMC")) ++depth;
+                                if (isOp(ins[t].op, "EMC")) --depth;
                             }
                             for (size_t t = ms + 1; t < me; ++t) {
                                 const std::string& o = ins[t].op;
-                                if (o != "gs" && o != "Do" && o != "cm" && o != "q" && o != "Q") simple = false;
+                                if (!isOp(o, "gs") && !isOp(o, "Do") && !isOp(o, "cm") && !isOp(o, "q") && !isOp(o, "Q")) simple = false;
                             }
                             if (simple && me > k) { s = ms; e = me; }
                         }
                         if (s == k) {   // not in a marker block: take preceding gs
-                            while (s > 0 && ins[s - 1].op == "gs") --s;
+                            while (s > 0 && isOp(ins[s - 1].op, "gs")) --s;
                         }
-                        if (s >= 2 && e + 1 < ins.size() && ins[s - 1].op == "cm" && ins[s - 2].op == "q" && ins[e + 1].op == "Q") { s -= 2; ++e; }
+                        if (s >= 2 && e + 1 < ins.size() && isOp(ins[s - 1].op, "cm") && isOp(ins[s - 2].op, "q") && isOp(ins[e + 1].op, "Q")) { s -= 2; ++e; }
                         for (size_t t = s; t <= e; ++t) {
                             kill[t] = true;
-                            if (ins[t].op == "Do" || ins[t].op == "gs") if (!ins[t].a.empty() && ins[t].a[0].isName()) touchedNames.insert(ins[t].op + ins[t].a[0].getName());
+                            if (isOp(ins[t].op, "Do") || isOp(ins[t].op, "gs")) if (!ins[t].a.empty() && ins[t].a[0].isName()) touchedNames.insert(ins[t].op + ins[t].a[0].getName());
                         }
                         ++R.formsRemoved;
                     }
@@ -1133,7 +1187,7 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
             if (dropBlock && pi < A.bKill.size()) {
                 for (size_t t : A.bKill[pi]) {
                     kill[t] = true;
-                    if (ins[t].op == "Do" && !ins[t].a.empty() && ins[t].a[0].isName()) touchedNames.insert("Do" + ins[t].a[0].getName());
+                    if (isOp(ins[t].op, "Do") && !ins[t].a.empty() && ins[t].a[0].isName()) touchedNames.insert("Do" + ins[t].a[0].getName());
                     ++R.blockItemsRemoved;
                 }
             }
@@ -1145,8 +1199,8 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                     if (kill[k]) continue;
                     auto& i = ins[k];
                     const std::string& op = i.op;
-                    if (op == "q") st.push_back(g);
-                    else if (op == "Q") { if (!st.empty()) { g = st.back(); st.pop_back(); } }
+                    if (isOp(op, "q")) st.push_back(g);
+                    else if (isOp(op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); } }
                     else if (isFillColourOp(op)) {
                         Colour c;
                         if (numeric(i, c)) {
@@ -1157,13 +1211,13 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                             }
                             g.fill = c;
                         }
-                    } else if (op == "BT") { inBT = true; shown = false; btStart = k; }
-                    else if ((op == "Tj" || op == "TJ") && inBT && !shown) { shown = true; btCol = g.fill; }
-                    else if (op == "ET") {
+                    } else if (isOp(op, "BT")) { inBT = true; shown = false; btStart = k; }
+                    else if ((isOp(op, "Tj") || isOp(op, "TJ")) && inBT && !shown) { shown = true; btCol = g.fill; }
+                    else if (isOp(op, "ET")) {
                         inBT = false;
                         if (shown && ckey(btCol) == Gk) { for (size_t t = btStart; t <= k; ++t) kill[t] = true; ++R.textBlocksRemoved; }
-                    } else if ((op == "f" || op == "F" || op == "f*" || op == "B" || op == "B*" || op == "b" || op == "b*") && ckey(g.fill) == Gk) {
-                        std::string nop = (op == "B" || op == "B*") ? "S" : (op == "b" || op == "b*") ? "s" : "n";
+                    } else if ((isOp(op, "f") || isOp(op, "F") || isOp(op, "f*") || isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*")) && ckey(g.fill) == Gk) {
+                        std::string nop = (isOp(op, "B") || isOp(op, "B*")) ? "S" : (isOp(op, "b") || isOp(op, "b*")) ? "s" : "n";
                         i.op = nop; ++R.fillsRemoved;
                     }
                 }
@@ -1181,7 +1235,7 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                     for (auto& tn : touchedNames) {
                         bool isDo = tn.rfind("Do", 0) == 0; std::string name = tn.substr(isDo ? 2 : 2);
                         bool used = false;
-                        for (auto& i : outIns) if ((i.op == "Do" || i.op == "gs") && !i.a.empty() && i.a[0].isName() && i.a[0].getName() == name && i.op == (isDo ? "Do" : "gs")) used = true;
+                        for (auto& i : outIns) if ((isOp(i.op, "Do") || isOp(i.op, "gs")) && !i.a.empty() && i.a[0].isName() && i.a[0].getName() == name && i.op == (isDo ? "Do" : "gs")) used = true;
                         if (used) continue;
                         const char* dk = isDo ? "/XObject" : "/ExtGState";
                         QPDFObjectHandle d = nres.getKey(dk);
@@ -1190,6 +1244,26 @@ RemoveResult remove(const std::filesystem::path& in, const std::filesystem::path
                 }
             }
         }
+        // --- coloured watermark inside full-page images: solve every pixel for the grey level underneath
+        if (bitmap) {
+            const bmp::Model M = bmp::Model::unpack(bitmap->bitmapModel);
+            std::set<QPDFObjGen> done;
+            for (auto& page : pages)
+                for (auto& x : bmp::pageImages(page.getObjectHandle())) {
+                    if (!done.insert(x.getObjGen()).second) continue;
+                    bmp::Image im;
+                    if (!bmp::decode(x, im)) continue;
+                    auto st = bmp::clean(im, M);
+                    if (st.changed == 0) continue;
+                    // write back as plain RGB; the writer compresses it (Flate, lossless)
+                    auto d = x.getDict();
+                    d.replaceKey("/ColorSpace", QPDFObjectHandle::newName("/DeviceRGB"));
+                    d.replaceKey("/BitsPerComponent", QPDFObjectHandle::newInteger(8));
+                    x.replaceStreamData(std::string((const char*)im.rgb.data(), im.rgb.size()), QPDFObjectHandle::newNull(), QPDFObjectHandle::newNull());
+                    ++R.imagesCleaned; R.pixelsChanged += st.changed;
+                }
+        }
+        fastDeflate();
         QPDFWriter w(pdf, toU8(out).c_str());
         w.setCompressStreams(true);
         w.setDecodeLevel(qpdf_dl_none);
@@ -1255,6 +1329,7 @@ void writePages(QPDF& pdf, std::vector<QPDFPageObjectHelper>& pages, std::vector
         for (size_t k = 0; k < ins[pi].size(); ++k) if (!kill[pi][k]) o.push_back(ins[pi][k]);
         pages[pi].getObjectHandle().replaceKey("/Contents", QPDFObjectHandle::newStream(&pdf, serialize(o)));
     }
+    fastDeflate();
     QPDFWriter w(pdf, toU8(out).c_str());
     w.setCompressStreams(true);
     w.setDecodeLevel(qpdf_dl_none);
@@ -1321,7 +1396,7 @@ ShapeResult shapeImpl(const std::filesystem::path& in, const std::filesystem::pa
             const Ev& e = E[pi][k];
             for (size_t t = e.first; t <= e.last; ++t) {
                 const std::string& o = ins[pi][t].op;
-                if (o == "m" || o == "l" || o == "c" || o == "v" || o == "y" || o == "re" || o == "h" || o == "S" || o == "s") kill[pi][t] = true;
+                if (isOp(o, "m") || isOp(o, "l") || isOp(o, "c") || isOp(o, "v") || isOp(o, "y") || isOp(o, "re") || isOp(o, "h") || isOp(o, "S") || isOp(o, "s")) kill[pi][t] = true;
             }
         };
         std::set<std::pair<int, int>> done;   // (page, stroke) already removed
@@ -1448,12 +1523,12 @@ std::vector<ShownText> shownTexts(QPDFPageObjectHelper& page, std::vector<Instr>
     std::vector<const FontMap*> st;
     for (size_t k = 0; k < ins.size(); ++k) {
         Instr& i = ins[k];
-        if (i.op == "Tf" && !i.a.empty() && i.a[0].isName()) {
+        if (isOp(i.op, "Tf") && !i.a.empty() && i.a[0].isName()) {
             const std::string nm = i.a[0].getName();
             auto it = cache.find(nm);
             if (it == cache.end()) it = cache.emplace(nm, loadFont(fonts.isDictionary() ? fonts.getKey(nm) : QPDFObjectHandle::newNull())).first;
             cur = &it->second;
-        } else if (i.op == "Tj" || i.op == "TJ" || i.op == "'" || i.op == "\"") {
+        } else if (isOp(i.op, "Tj") || isOp(i.op, "TJ") || isOp(i.op, "'") || isOp(i.op, "\"")) {
             std::string raw;
             for (auto& o : i.a) {
                 if (o.isString()) raw += o.getStringValue();
@@ -1653,8 +1728,12 @@ FileResult applyRecipe(const std::filesystem::path& in, const std::filesystem::p
     auto tmpName = [&](int k) { fs::path t = out; t += ".part" + std::to_string(k); tmps.push_back(t); return t; };
     auto cleanup = [&] { std::error_code ec; for (auto& t : tmps) fs::remove(t, ec); };
     fs::path cur = in;
-    R.strokesBefore = countStrokes(in);
-    if (R.strokesBefore < 0) { R.error = "无法读取文件"; return R; }
+    // The stroke count of the input is only needed for the integrity check: count it in the background while the real work runs,
+    // and not at all for previews (verify == false).
+    std::future<long> before;
+    if (rc.verify) before = std::async(std::launch::async, [&in] { return countStrokes(in); });
+    auto joinBefore = [&] { if (before.valid()) R.strokesBefore = before.get(); };
+    struct Join { std::function<void()> f; ~Join() { if (f) f(); } } joinGuard{joinBefore};   // never leave the thread running when we return early
     long shapeStrokes = 0;
     int step = 0;
     auto nextOut = [&](bool last) { return last ? out : tmpName(++step); };
@@ -1663,14 +1742,13 @@ FileResult applyRecipe(const std::filesystem::path& in, const std::filesystem::p
     int done = 0;
     try {
         if (rc.removeDetected) {
-            Report rep = analyze(cur);
-            if (rep.hasRemovable() || !alsoRemove.empty()) {
-                bool last = ++done == stages;
-                fs::path o = nextOut(last);
-                R.detected = remove(cur, o, alsoRemove);
-                if (!R.detected.ok) { R.error = R.detected.error; cleanup(); return R; }
-                cur = o;
-            } else ++done;
+            // remove() analyses the file itself; no separate analyze() pass first (that doubled the time)
+            bool last = ++done == stages;
+            fs::path o = nextOut(last);
+            R.detected = remove(cur, o, alsoRemove);
+            if (R.detected.ok) cur = o;
+            else if (R.detected.error == kNothingToRemove) { /* nothing detected: not an error, the other stages may still apply */ }
+            else { R.error = R.detected.error; cleanup(); return R; }
         }
         if (!rc.texts.empty()) {
             bool last = ++done == stages;
@@ -1688,9 +1766,13 @@ FileResult applyRecipe(const std::filesystem::path& in, const std::filesystem::p
         }
         if (cur != out) { std::error_code ec; fs::copy_file(cur, out, fs::copy_options::overwrite_existing, ec); }   // nothing needed removing
         cleanup();
-        R.strokesAfter = countStrokes(out);
-        R.strokesExpected = R.strokesBefore - shapeStrokes;
-        R.verified = R.strokesAfter == R.strokesExpected;
+        if (rc.verify) {
+            joinBefore();
+            if (R.strokesBefore < 0) { std::error_code ec; fs::remove(out, ec); R.error = "无法读取文件"; return R; }
+            R.strokesAfter = countStrokes(out);
+            R.strokesExpected = R.strokesBefore - shapeStrokes;
+            R.verified = R.strokesAfter == R.strokesExpected;
+        } else R.verified = true;
         if (R.removedTotal() == 0) { std::error_code ec; fs::remove(out, ec); R.error = "没有找到可去除的内容"; R.nothingToDo = true; return R; }
         if (rc.verify && !R.verified) {
             std::error_code ec; fs::remove(out, ec);
@@ -1710,6 +1792,7 @@ struct Painter {
     std::vector<DrawItem>* out;
     double H = 0, ox = 0, oy = 0;     // page height and origin (to flip into top-left space)
     int depth = 0;
+    bool images = true;               // decode image pixels for the preview
     struct St { Mat ctm{1, 0, 0, 1, 0, 0}; Colour fill{0}, stroke{0}; double lw = 1, fa = 1, sa = 1; };
     static void rgbOf(const Colour& c, float& r, float& g, float& b) {
         if (c.size() == 1) r = g = b = (float)c[0];
@@ -1764,15 +1847,15 @@ struct Painter {
         };
         for (auto& i : ins) {
             const std::string& op = i.op;
-            if (op == "q") stack.push_back(g);
-            else if (op == "Q") { if (!stack.empty()) { g = stack.back(); stack.pop_back(); } }
-            else if (op == "cm") g.ctm = mul(numMat(i), g.ctm);
-            else if (op == "w") g.lw = num(i, 0);
-            else if (op == "g" || op == "rg" || op == "k") { Colour c; if (numeric(i, c)) g.fill = c; }
-            else if (op == "G" || op == "RG" || op == "K") { Colour c; if (numeric(i, c)) g.stroke = c; }
-            else if (op == "sc" || op == "scn") { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.fill = c; }
-            else if (op == "SC" || op == "SCN") { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.stroke = c; }
-            else if (op == "gs" && !i.a.empty() && i.a[0].isName() && egs.isDictionary()) {
+            if (isOp(op, "q")) stack.push_back(g);
+            else if (isOp(op, "Q")) { if (!stack.empty()) { g = stack.back(); stack.pop_back(); } }
+            else if (isOp(op, "cm")) g.ctm = mul(numMat(i), g.ctm);
+            else if (isOp(op, "w")) g.lw = num(i, 0);
+            else if (isOp(op, "g") || isOp(op, "rg") || isOp(op, "k")) { Colour c; if (numeric(i, c)) g.fill = c; }
+            else if (isOp(op, "G") || isOp(op, "RG") || isOp(op, "K")) { Colour c; if (numeric(i, c)) g.stroke = c; }
+            else if (isOp(op, "sc") || isOp(op, "scn")) { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.fill = c; }
+            else if (isOp(op, "SC") || isOp(op, "SCN")) { Colour c; if (numeric(i, c) && (c.size() == 1 || c.size() == 3 || c.size() == 4)) g.stroke = c; }
+            else if (isOp(op, "gs") && !i.a.empty() && i.a[0].isName() && egs.isDictionary()) {
                 auto d = egs.getKey(i.a[0].getName());
                 if (d.isDictionary()) {
                     auto ca = d.getKey("/ca"), CA = d.getKey("/CA");
@@ -1780,13 +1863,13 @@ struct Painter {
                     if (CA.isNumber()) g.sa = CA.getNumericValue();
                 }
             }
-            else if (op == "m") { subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
-            else if (op == "l") { if (subs.empty()) subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
-            else if (op == "c" || op == "v" || op == "y") {
+            else if (isOp(op, "m")) { subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
+            else if (isOp(op, "l")) { if (subs.empty()) subs.emplace_back(); subs.back().push_back(map(g.ctm, num(i, 0), num(i, 1))); cx = num(i, 0); cy = num(i, 1); }
+            else if (isOp(op, "c") || isOp(op, "v") || isOp(op, "y")) {
                 if (subs.empty()) subs.emplace_back();
                 double x1, y1, x2, y2, x3, y3;
-                if (op == "c") { x1 = num(i, 0); y1 = num(i, 1); x2 = num(i, 2); y2 = num(i, 3); x3 = num(i, 4); y3 = num(i, 5); }
-                else if (op == "v") { x1 = cx; y1 = cy; x2 = num(i, 0); y2 = num(i, 1); x3 = num(i, 2); y3 = num(i, 3); }
+                if (isOp(op, "c")) { x1 = num(i, 0); y1 = num(i, 1); x2 = num(i, 2); y2 = num(i, 3); x3 = num(i, 4); y3 = num(i, 5); }
+                else if (isOp(op, "v")) { x1 = cx; y1 = cy; x2 = num(i, 0); y2 = num(i, 1); x3 = num(i, 2); y3 = num(i, 3); }
                 else { x1 = num(i, 0); y1 = num(i, 1); x3 = num(i, 2); y3 = num(i, 3); x2 = x3; y2 = y3; }
                 for (int s = 1; s <= 8; ++s) {
                     const double t = s / 8.0, u = 1 - t;
@@ -1795,32 +1878,32 @@ struct Painter {
                 }
                 cx = x3; cy = y3;
             }
-            else if (op == "re") {
+            else if (isOp(op, "re")) {
                 const double x = num(i, 0), y = num(i, 1), w = num(i, 2), h = num(i, 3);
                 subs.emplace_back();
                 for (auto q : {std::make_pair(x, y), std::make_pair(x + w, y), std::make_pair(x + w, y + h), std::make_pair(x, y + h), std::make_pair(x, y)}) subs.back().push_back(map(g.ctm, q.first, q.second));
             }
-            else if (op == "h") { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); }
-            else if (op == "S" || op == "s") { if (op == "s") { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); } paint(false, true); }
-            else if (op == "f" || op == "F" || op == "f*") paint(true, false);
-            else if (op == "B" || op == "B*" || op == "b" || op == "b*") paint(true, true);
-            else if (op == "n") subs.clear();
-            else if (op == "BT") { tm = tlm = {1, 0, 0, 1, 0, 0}; }
-            else if (op == "Tm" && i.a.size() == 6) tm = tlm = numMat(i);
-            else if (op == "Td") { tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
-            else if (op == "TD") { leading = -num(i, 1); tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
-            else if (op == "TL") leading = num(i, 0);
-            else if (op == "T*") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; }
-            else if (op == "Tf" && i.a.size() == 2 && i.a[0].isName()) {
+            else if (isOp(op, "h")) { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); }
+            else if (isOp(op, "S") || isOp(op, "s")) { if (isOp(op, "s")) { if (!subs.empty() && !subs.back().empty()) subs.back().push_back(subs.back().front()); } paint(false, true); }
+            else if (isOp(op, "f") || isOp(op, "F") || isOp(op, "f*")) paint(true, false);
+            else if (isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*")) paint(true, true);
+            else if (isOp(op, "n")) subs.clear();
+            else if (isOp(op, "BT")) { tm = tlm = {1, 0, 0, 1, 0, 0}; }
+            else if (isOp(op, "Tm") && i.a.size() == 6) tm = tlm = numMat(i);
+            else if (isOp(op, "Td")) { tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+            else if (isOp(op, "TD")) { leading = -num(i, 1); tlm = mul({1, 0, 0, 1, num(i, 0), num(i, 1)}, tlm); tm = tlm; }
+            else if (isOp(op, "TL")) leading = num(i, 0);
+            else if (isOp(op, "T*")) { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; }
+            else if (isOp(op, "Tf") && i.a.size() == 2 && i.a[0].isName()) {
                 fsize = i.a[1].getNumericValue();
                 const std::string nm = i.a[0].getName();
                 auto it = fcache.find(nm);
                 if (it == fcache.end()) it = fcache.emplace(nm, loadFont(fonts.isDictionary() ? fonts.getKey(nm) : QPDFObjectHandle::newNull())).first;
                 font = &it->second;
             }
-            else if (op == "Tj" || op == "TJ") showText(i);
-            else if (op == "'" || op == "\"") { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; showText(i); }
-            else if (op == "Do" && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) {
+            else if (isOp(op, "Tj") || isOp(op, "TJ")) showText(i);
+            else if (isOp(op, "'") || isOp(op, "\"")) { tlm = mul({1, 0, 0, 1, 0, -leading}, tlm); tm = tlm; showText(i); }
+            else if (isOp(op, "Do") && !i.a.empty() && i.a[0].isName() && xo.isDictionary()) {
                 QPDFObjectHandle x = xo.getKey(i.a[0].getName());
                 if (!x.isStream()) continue;
                 auto sub = x.getDict().getKey("/Subtype");
@@ -1828,6 +1911,24 @@ struct Painter {
                     DrawItem d; d.kind = DrawItem::ImageBox;
                     for (auto q : {std::make_pair(0.0, 0.0), std::make_pair(1.0, 0.0), std::make_pair(1.0, 1.0), std::make_pair(0.0, 1.0), std::make_pair(0.0, 0.0)}) d.pts.push_back(map(g.ctm, q.first, q.second));
                     d.r = d.g = d.b = 0.6f; d.a = 0.5f;
+                    bmp::Image im;   // show the real pixels (downsampled) so the before/after preview works for image pages too
+                    if (images && bmp::decode(x, im) && im.w > 0 && im.h > 0) {
+                        const int step = std::max(1, std::max(im.w, im.h) / 1400);
+                        d.kind = DrawItem::Image; d.iw = im.w / step; d.ih = im.h / step;
+                        d.rgb.resize((size_t)d.iw * d.ih * 3);
+                        for (int y = 0; y < d.ih; ++y)
+                            for (int xx = 0; xx < d.iw; ++xx) {
+                                // box filter over the step x step block, darkest-biased so thin lines stay visible
+                                int acc[3] = {0, 0, 0}, mn[3] = {255, 255, 255}, cnt = 0;
+                                for (int sy = 0; sy < step; ++sy)
+                                    for (int sx = 0; sx < step; ++sx) {
+                                        const uint8_t* s = &im.rgb[3 * ((size_t)(y * step + sy) * im.w + (xx * step + sx))];
+                                        for (int c = 0; c < 3; ++c) { acc[c] += s[c]; mn[c] = std::min<int>(mn[c], s[c]); }
+                                        ++cnt;
+                                    }
+                                for (int c = 0; c < 3; ++c) d.rgb[3 * ((size_t)y * d.iw + xx) + c] = (unsigned char)((acc[c] / cnt + mn[c]) / 2);
+                            }
+                    }
                     out->push_back(std::move(d));
                 } else if (sub.isName() && sub.getName() == "/Form" && depth < 4) {
                     St h = g;
@@ -1868,6 +1969,186 @@ PageDrawing drawPage(const std::filesystem::path& in, int page) {
         auto ins = parsePage(pg);
         Painter::St st;
         P.run(ins, pg.getObjectHandle().getKey("/Resources"), st);
+        R.ok = true;
+    } catch (std::exception& e) { R.error = e.what(); }
+    return R;
+}
+
+
+// ============================================================================ adding a watermark
+
+namespace {
+std::string fmtNum(double v) {
+    char b[32];
+    if (std::fabs(v - std::round(v)) < 0.005) std::snprintf(b, sizeof b, "%.0f", v);
+    else std::snprintf(b, sizeof b, "%.2f", v);
+    std::string s(b);
+    if (s == "-0") s = "0";
+    return s;
+}
+Mat inverse(const Mat& m, bool& ok) {
+    const double det = m[0] * m[3] - m[1] * m[2];
+    ok = std::fabs(det) > 1e-9;
+    if (!ok) return {1, 0, 0, 1, 0, 0};
+    const double a = m[3] / det, b = -m[1] / det, c = -m[2] / det, d = m[0] / det;
+    return {a, b, c, d, -(m[4] * a + m[5] * c), -(m[4] * b + m[5] * d)};
+}
+std::string pathOps(const StampPath& p) {
+    std::string o; size_t k = 0;
+    auto pt = [&](int n) { for (int i = 0; i < n && k < p.pts.size(); ++i, ++k) { o += fmtNum(p.pts[k]); o += ' '; } };
+    for (char c : p.ops) {
+        if (c == 'M') { pt(2); o += "m\n"; }
+        else if (c == 'L') { pt(2); o += "l\n"; }
+        else if (c == 'C') { pt(6); o += "c\n"; }
+        else if (c == 'Z') o += "h\n";
+    }
+    return o;
+}
+// Positions after which a self-contained "q ... Q" unit may be inserted without changing anything the page draws:
+// outside text objects and marked content, not in the middle of building a path, and with no clipping path in force.
+// Also never before something opaque and large (an image, a big filled area, a form, a shading): it would paint over the stamp.
+struct Slot { size_t after; Mat ctm; };
+std::vector<Slot> insertionSlots(std::vector<Instr>& ins, double pageArea) {
+    struct S { Mat ctm{1, 0, 0, 1, 0, 0}; bool clipped = false; };
+    std::vector<Slot> slots;
+    S g; std::vector<S> st;
+    bool inText = false, building = false, pendingClip = false; int mc = 0;
+    double bx0 = 1e18, by0 = 1e18, bx1 = -1e18, by1 = -1e18;   // bbox of the path being built (page space)
+    auto addPt = [&](double x, double y) {
+        const double px = g.ctm[0] * x + g.ctm[2] * y + g.ctm[4], py = g.ctm[1] * x + g.ctm[3] * y + g.ctm[5];
+        bx0 = std::min(bx0, px); by0 = std::min(by0, py); bx1 = std::max(bx1, px); by1 = std::max(by1, py);
+    };
+    long barrier = -1;   // index of the last large opaque painter
+    slots.push_back({(size_t)-1, g.ctm});   // before everything
+    for (size_t k = 0; k < ins.size(); ++k) {
+        Instr& in = ins[k];
+        const std::string& op = in.op;
+        auto num = [&](size_t j) { return j < in.a.size() && in.a[j].isNumber() ? in.a[j].getNumericValue() : 0.0; };
+        bool boundary = false;
+        if (isOp(op, "q")) st.push_back(g);
+        else if (isOp(op, "Q")) { if (!st.empty()) { g = st.back(); st.pop_back(); } boundary = true; }
+        else if (isOp(op, "cm") && in.a.size() == 6) g.ctm = mul(numMat(in), g.ctm);
+        else if (isOp(op, "BT")) inText = true;
+        else if (isOp(op, "ET")) { inText = false; boundary = true; }
+        else if (isOp(op, "BDC") || isOp(op, "BMC")) ++mc;
+        else if (isOp(op, "EMC")) { if (mc > 0) --mc; boundary = true; }
+        else if (!inText && (isOp(op, "m") || isOp(op, "l"))) { building = true; addPt(num(0), num(1)); }
+        else if (!inText && isOp(op, "c")) { building = true; addPt(num(0), num(1)); addPt(num(2), num(3)); addPt(num(4), num(5)); }
+        else if (!inText && (isOp(op, "v") || isOp(op, "y"))) { building = true; addPt(num(0), num(1)); addPt(num(2), num(3)); }
+        else if (!inText && isOp(op, "re")) { building = true; addPt(num(0), num(1)); addPt(num(0) + num(2), num(1) + num(3)); }
+        else if (isOp(op, "h")) { }
+        else if (isOp(op, "W") || isOp(op, "W*")) pendingClip = true;
+        else if (isOp(op, "S") || isOp(op, "s") || isOp(op, "f") || isOp(op, "F") || isOp(op, "f*") || isOp(op, "B") || isOp(op, "B*") || isOp(op, "b") || isOp(op, "b*") || isOp(op, "n")) {
+            const bool fills = !(isOp(op, "S") || isOp(op, "s") || isOp(op, "n"));
+            if (fills && bx1 > bx0 && (bx1 - bx0) * (by1 - by0) > 0.02 * pageArea) barrier = (long)k;
+            building = false; bx0 = by0 = 1e18; bx1 = by1 = -1e18;
+            if (pendingClip) { g.clipped = true; pendingClip = false; }
+            boundary = true;
+        }
+        else if (isOp(op, "Do")) {
+            barrier = (long)k;   // an image or a form: may be opaque and cover the stamp
+            boundary = true;
+        }
+        else if (isOp(op, "sh") || in.isInline) { barrier = (long)k; boundary = true; }
+        if (boundary && !inText && !building && mc == 0 && !g.clipped) slots.push_back({k, g.ctm});
+    }
+    std::vector<Slot> ok;
+    for (auto& sl : slots) if (barrier < 0 || (sl.after != (size_t)-1 && (long)sl.after >= barrier)) ok.push_back(sl);
+    if (ok.empty()) ok.push_back({ins.empty() ? (size_t)-1 : ins.size() - 1, {1, 0, 0, 1, 0, 0}});   // end of the page, default space
+    return ok;
+}
+}  // namespace
+
+StampResult addWatermark(const std::filesystem::path& in, const std::filesystem::path& out, const StampSpec& spec) {
+    StampResult R;
+    if (spec.pieces.empty() || spec.w <= 0 || spec.h <= 0) { R.error = "水印内容为空"; return R; }
+    QPDF pdf; std::string err;
+    if (!load(pdf, in, err)) { R.error = err; return R; }
+    try {
+        QPDFPageDocumentHelper doc(pdf);
+        doc.pushInheritedAttributesToPage();
+        auto pages = doc.getAllPages();
+        std::vector<std::string> body;
+        for (auto& pc : spec.pieces) body.push_back(pathOps(pc));
+        char col[64]; std::snprintf(col, sizeof col, "%.3f %.3f %.3f rg\n", spec.r, spec.g, spec.b);
+        uint32_t rng = 0x9E3779B9u;
+        auto rnd = [&rng] { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; };
+        for (size_t pi = 0; pi < pages.size(); ++pi) {
+            auto& page = pages[pi];
+            QPDFObjectHandle po = page.getObjectHandle();
+            auto mb = page.getMediaBox().getArrayAsRectangle();
+            const double x0 = std::min(mb.llx, mb.urx), y0 = std::min(mb.lly, mb.ury), pw = std::fabs(mb.urx - mb.llx), ph = std::fabs(mb.ury - mb.lly);
+            int rot = 0; { auto r = po.getKey("/Rotate"); if (r.isInteger()) rot = (int)(((r.getIntValue() % 360) + 360) % 360); }
+            // a graphics state with an innocuous, unused name: opacity + Multiply (lines under the stamp stay fully visible)
+            QPDFObjectHandle res = po.getKey("/Resources");
+            QPDFObjectHandle nres = res.isDictionary() ? res.shallowCopy() : QPDFObjectHandle::newDictionary();
+            QPDFObjectHandle egs = nres.getKey("/ExtGState");
+            egs = egs.isDictionary() ? egs.shallowCopy() : QPDFObjectHandle::newDictionary();
+            std::string gsName;
+            for (int t = 0; ; ++t) { gsName = "/GS" + std::to_string(100 + (rnd() % 900)) + (t ? std::to_string(t) : ""); if (!egs.hasKey(gsName)) break; }
+            QPDFObjectHandle gs = QPDFObjectHandle::newDictionary();
+            gs.replaceKey("/Type", QPDFObjectHandle::newName("/ExtGState"));
+            gs.replaceKey("/ca", QPDFObjectHandle::newReal(std::clamp(spec.opacity, 0.02, 1.0), 3));
+            gs.replaceKey("/CA", QPDFObjectHandle::newReal(std::clamp(spec.opacity, 0.02, 1.0), 3));
+            gs.replaceKey("/BM", QPDFObjectHandle::newName("/Multiply"));
+            gs.replaceKey("/SMask", QPDFObjectHandle::newName("/None"));
+            egs.replaceKey(gsName, gs);
+            nres.replaceKey("/ExtGState", egs);
+            po.replaceKey("/Resources", nres);
+            // tile the page (in the page's own space; the angle is corrected for /Rotate so the text reads as asked)
+            const double ang = (spec.angleDeg + rot) * 3.14159265358979 / 180.0, ca = std::cos(ang), sa = std::sin(ang);
+            const double sx = spec.w + spec.gapX, sy = spec.h + spec.gapY, reach = std::hypot(pw, ph) / 2 + std::hypot(spec.w, spec.h);
+            const double cx = x0 + pw / 2, cy = y0 + ph / 2;
+            std::vector<Mat> tiles;
+            const int ni = (int)std::ceil(reach / sx) + 1, nj = (int)std::ceil(reach / sy) + 1;
+            for (int j = -nj; j <= nj; ++j)
+                for (int i = -ni; i <= ni; ++i) {
+                    const double u = (i + ((j & 1) ? 0.5 : 0.0)) * sx, v = j * sy;
+                    const double tx = cx + u * ca - v * sa, ty = cy + u * sa + v * ca;
+                    const double m = std::hypot(spec.w, spec.h) / 2;
+                    if (tx < x0 - m || tx > x0 + pw + m || ty < y0 - m || ty > y0 + ph + m) continue;
+                    tiles.push_back({ca, sa, -sa, ca, tx, ty});
+                }
+            // units: (tile, piece), shuffled, then spread over the page's own drawing
+            std::vector<std::pair<int, int>> units;
+            for (int t = 0; t < (int)tiles.size(); ++t) for (int k = 0; k < (int)body.size(); ++k) units.emplace_back(t, k);
+            for (size_t k = units.size(); k > 1; --k) std::swap(units[k - 1], units[rnd() % k]);
+            std::vector<Instr> ins = parsePage(page);
+            auto slots = insertionSlots(ins, pw * ph);
+            std::vector<std::vector<std::string>> at(slots.size());
+            for (size_t k = 0; k < units.size(); ++k) {
+                size_t si = slots.size() == 1 ? 0 : (size_t)((double)k * slots.size() / units.size());
+                si = std::min(si, slots.size() - 1);
+                bool ok = false; Mat inv = inverse(slots[si].ctm, ok);
+                if (!ok) { si = 0; inv = {1, 0, 0, 1, 0, 0}; }
+                const Mat& T = tiles[units[k].first];
+                const Mat M = mul(T, inv);   // final CTM = T in default page space
+                std::string u = "q\n";
+                for (int q = 0; q < 6; ++q) { char b[32]; std::snprintf(b, sizeof b, "%.4f ", M[q]); u += b; }
+                u += "cm\n" + gsName + " gs\n" + col + body[units[k].second] + "f\nQ\n";
+                at[si].push_back(std::move(u));
+            }
+            // write: original instructions with the units in between
+            std::vector<Instr> head;
+            std::string data;
+            auto flushUnits = [&](size_t si) { for (auto& u : at[si]) data += u; };
+            size_t si = 0;
+            if (!slots.empty() && slots[0].after == (size_t)-1) { flushUnits(0); si = 1; }
+            std::vector<Instr> chunk;
+            for (size_t k = 0; k < ins.size(); ++k) {
+                chunk.push_back(ins[k]);
+                if (si < slots.size() && slots[si].after == k) { data += serialize(chunk); chunk.clear(); flushUnits(si); ++si; }
+            }
+            data += serialize(chunk);
+            po.replaceKey("/Contents", QPDFObjectHandle::newStream(&pdf, data));
+            R.units += (int)units.size();
+            ++R.pages;
+        }
+        fastDeflate();
+        QPDFWriter w(pdf, toU8(out).c_str());
+        w.setCompressStreams(true);
+        w.setDecodeLevel(qpdf_dl_none);
+        w.write();
         R.ok = true;
     } catch (std::exception& e) { R.error = e.what(); }
     return R;

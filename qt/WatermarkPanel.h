@@ -60,6 +60,7 @@ public:
     bool hasManualGroup() const { return manual_ >= 0; }
     int pltGroup() const { return pltGroup_; }
     QStringList cleanedPltFiles() const;                    // outputs of PLT files that were processed successfully
+    QStringList cleanedPdfFiles() const;                    // outputs of PDF files that were processed successfully (for 添加水印)
     wm::Recipe& recipe(int group) { return recipes_[group]; }
     int currentGroup() const { return curGroup_; }
     void selectGroup(int g);
@@ -157,7 +158,7 @@ private:
     QProgressBar* runBar_ = nullptr;
     QLabel* runInfo_ = nullptr;
     QTableWidget* runTable_ = nullptr;
-    QPushButton *runStart_ = nullptr, *runCancel_ = nullptr, *runCsv_ = nullptr, *runOpen_ = nullptr, *runConvert_ = nullptr;
+    QPushButton *runStart_ = nullptr, *runCancel_ = nullptr, *runCsv_ = nullptr, *runOpen_ = nullptr, *runConvert_ = nullptr, *runStamp_ = nullptr, *runStampCfg_ = nullptr;
     QPointF pltOrigin_;          // maps preview coordinates back to PLT millimetres (x = px + ox, y = oy - py)
     double pltPad_ = 10;
 
@@ -177,6 +178,7 @@ private:
     std::atomic<quint64> previewGen_{0};
     QThreadPool previewPool_;
     QThreadPool workPool_;
+    QMutex applyMutex_;
     std::atomic<int> previewApply_{0};
     QMutex pvMutex_;
     QHash<QString, std::shared_ptr<wm::PageDrawing>> drawCache_;   // "b|file#page" original, "a|key#page" after removal

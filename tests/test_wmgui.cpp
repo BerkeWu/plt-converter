@@ -19,6 +19,7 @@
 #include "MainWindow.h"
 #include "plt.h"
 #include "WatermarkPanel.h"
+#include "Stamp.h"
 
 static void waitIdle(WatermarkPanel& p, int ms = 60000) {
     QElapsedTimer t; t.start();
@@ -32,6 +33,58 @@ class WmGuiTest : public QObject {
     QString data_;
     QTemporaryDir cfgDir_;
 private slots:
+    // 一键添加水印: the stamp is plain filled outlines inside the page content - nothing a PDF editor treats as "a watermark"
+    void stampIsPlainContent() {
+        QTemporaryDir tmp;
+        StampSettings st; st.text = QStringLiteral("浩洋纸样\nHAOYANG 2026"); st.sizePt = 20; st.angle = 30; st.gapMm = 20; st.opacity = 30;
+        const wm::StampSpec spec = buildStampSpec(st);
+        QVERIFY(spec.pieces.size() >= 10);                      // one piece per character
+        QVERIFY(spec.w > 40 && spec.h > 20);
+        for (const char* name : {"A_clean.pdf", "K_bitmap_colour.pdf", "C_flat.pdf"}) {
+            const QString in = QDir(data_).filePath(name), out = tmp.filePath(QString("st_%1").arg(name));
+            const auto inP = wm::fromU8(in.toUtf8().toStdString()), outP = wm::fromU8(out.toUtf8().toStdString());
+            const auto r = wm::addWatermark(inP, outP, spec);
+            QVERIFY2(r.ok, r.error.c_str());
+            QVERIFY(r.units > 20 * r.pages);
+            QCOMPARE(wm::countStrokes(outP), wm::countStrokes(inP));         // only fills are added; every pattern line is still there
+            QCOMPARE(wm::listText(outP).size(), wm::listText(inP).size());   // no text objects added (outlines, not searchable text)
+            QFile f(out); QVERIFY(f.open(QIODevice::ReadOnly));
+            const QByteArray raw = f.readAll();
+            for (const char* marker : {"/Watermark", "/Artifact", "/OCProperties", "/PieceInfo", "/ADBE_"}) {
+                QFile g(in); QVERIFY(g.open(QIODevice::ReadOnly));
+                QCOMPARE(raw.count(marker), g.readAll().count(marker));      // no new watermark markers of any kind
+            }
+            // the page now really shows the stamp: many more filled paths than before
+            const auto before = wm::drawPage(inP, 1), after = wm::drawPage(outP, 1);
+            int fb = 0, fa = 0;
+            for (auto& it : before.items) if (it.kind == wm::DrawItem::Fill) ++fb;
+            for (auto& it : after.items) if (it.kind == wm::DrawItem::Fill) ++fa;
+            QVERIFY(fa >= fb + 20);
+            if (qEnvironmentVariableIsSet("STAMP_KEEP")) QFile::copy(out, QDir(qEnvironmentVariable("STAMP_KEEP")).filePath(QString("st_%1").arg(name)));
+        }
+        // the one-click flow with saved settings (no dialog): writes <name>_水印.pdf next to the input
+        st.askEveryTime = false; st.save();
+        qputenv("PLT_NO_DIALOGS", "1");
+        const QString src = tmp.filePath("one_haoyang.pdf");
+        QVERIFY(QFile::copy(QDir(data_).filePath("A_clean.pdf"), src));
+        const QStringList written = runStampFlow({src}, nullptr);
+        QCOMPARE(written, QStringList{tmp.filePath("one_haoyang_水印.pdf")});
+        QVERIFY(QFileInfo::exists(written.first()) && QFileInfo::exists(src));
+        QVERIFY(!QFileInfo::exists(written.first() + ".stamp-tmp"));
+        if (qEnvironmentVariableIsSet("STAMP_KEEP")) {   // review page of a bitmap file: the preview shows the real pixels
+            WatermarkPanel pnl; pnl.resize(1300, 820); pnl.show();
+            pnl.addFiles({QDir(data_).filePath("K_bitmap_colour.pdf")});
+            QTRY_VERIFY_WITH_TIMEOUT(!pnl.busy() && pnl.files().size() == 1 && pnl.files()[0].analyzed, 20000);
+            pnl.goStep(1);
+            QTest::qWait(4000);
+            pnl.grab().save(QDir(qEnvironmentVariable("STAMP_KEEP")).filePath("review_bitmap.png"));
+        }
+        if (qEnvironmentVariableIsSet("STAMP_KEEP")) { StampDialog dlg(3); dlg.show(); QTest::qWait(100); dlg.grab().save(QDir(qEnvironmentVariable("STAMP_KEEP")).filePath("dialog.png")); }
+        // output naming: _水印 next to the input; stamping a stamped file again keeps the name
+        QCOMPARE(QFileInfo(stampOutputPath("/x/a_haoyang.pdf", st)).fileName(), QStringLiteral("a_haoyang_水印.pdf"));
+        QCOMPARE(stampOutputPath("/x/a_haoyang_水印.pdf", st), QStringLiteral("/x/a_haoyang_水印.pdf"));
+    }
+
     void initTestCase() {
         QSettings::setDefaultFormat(QSettings::IniFormat);                               // never touch the user's real settings
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, cfgDir_.path());

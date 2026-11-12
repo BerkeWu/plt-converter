@@ -1,4 +1,5 @@
 #include "WatermarkPanel.h"
+#include "Stamp.h"
 
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -43,7 +44,7 @@
 #include "pltedit.h"
 
 namespace {
-const char* kKind[] = {"独立叠加对象", "斜铺文字", "页眉页脚/页码", "整页位图", "同层店铺信息栏"};
+const char* kKind[] = {"独立叠加对象", "斜铺文字", "页眉页脚/页码", "整页位图·彩色水印", "同层店铺信息栏"};
 QString u8(const std::string& s) { return QString::fromUtf8(s.c_str(), int(s.size())); }
 std::string s8(const QString& s) { const QByteArray b = s.toUtf8(); return std::string(b.constData(), size_t(b.size())); }
 std::filesystem::path fsPath(const QString& s) { return wm::fromU8(s8(s)); }
@@ -92,12 +93,11 @@ void clearLayout(QLayout* l) {
 // ============================================================================ construction
 
 WatermarkPanel::WatermarkPanel(QWidget* parent) : QWidget(parent) {
-    previewPool_.setMaxThreadCount(1);
-    // analysis / removal never gets more than half of the cores (and at most 3), at low priority:
-    // 20 files dropped in at once must not turn every core on and spin the fans up
-    workPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 3));
-    workPool_.setThreadPriority(QThread::LowPriority);
-    previewPool_.setThreadPriority(QThread::LowPriority);
+    // Analysis / preview / removal run on their own pools at normal priority, leaving one core to the UI.  Responsiveness comes from
+    // doing each piece of work once (single flight, caches, generation counter), not from starving the workers.
+    const int cores = std::max(2, QThread::idealThreadCount());
+    workPool_.setMaxThreadCount(std::clamp(cores - 1, 2, 8));
+    previewPool_.setMaxThreadCount(2);
     setAcceptDrops(true);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -467,7 +467,12 @@ QWidget* WatermarkPanel::buildRunPage() {
     connect(runCancel_, &QPushButton::clicked, this, [this] { cancel_ = true; });
     connect(runCsv_, &QPushButton::clicked, this, [this] { exportReport(); });
     connect(runOpen_, &QPushButton::clicked, this, [this] { openOutput(); });
-    br->addWidget(runStart_); br->addWidget(runCancel_); br->addStretch(1); br->addWidget(runCsv_); br->addWidget(runOpen_); br->addWidget(runConvert_);
+    runStamp_ = mkBtn(tr("添加水印"));
+    runStamp_->setToolTip(tr("给去好水印的 PDF 一键加上你自己的水印（矢量轮廓写入页面内容，WPS/Acrobat 的「删除水印」认不出）。"));
+    runStampCfg_ = mkBtn(tr("水印设置…"));
+    connect(runStamp_, &QPushButton::clicked, this, [this] { runStampFlow(cleanedPdfFiles(), this); });
+    connect(runStampCfg_, &QPushButton::clicked, this, [this] { runStampFlow(cleanedPdfFiles(), this, true); });
+    br->addWidget(runStart_); br->addWidget(runCancel_); br->addStretch(1); br->addWidget(runCsv_); br->addWidget(runOpen_); br->addWidget(runStamp_); br->addWidget(runStampCfg_); br->addWidget(runConvert_);
     v->addLayout(br);
     return page;
 }
@@ -992,6 +997,12 @@ std::vector<size_t> WatermarkPanel::pltRemovalLines(const WmFile& f, const wm::R
     return {all.begin(), all.end()};
 }
 
+QStringList WatermarkPanel::cleanedPdfFiles() const {
+    QStringList r;
+    for (auto& f : files_) if (!f.isPlt && (f.status == WmFile::Done || f.status == WmFile::NeedsCheck) && !f.outPath.isEmpty() && QFileInfo::exists(f.outPath)) r << f.outPath;
+    return r;
+}
+
 QStringList WatermarkPanel::cleanedPltFiles() const {
     QStringList r;
     for (auto& f : files_) if (f.isPlt && (f.status == WmFile::Done || f.status == WmFile::NeedsCheck) && !f.outPath.isEmpty()) r << f.outPath;
@@ -1060,6 +1071,7 @@ void WatermarkPanel::refreshPreview() {
         if (res->second) return;
         QString after;
         bool known = false;
+        QMutexLocker applyLock(&applyMutex_);                            // two previews of the same recipe never apply it twice
         { QMutexLocker lk(&pvMutex_); known = afterFiles_.contains(key); if (known) after = afterFiles_.value(key); }
         if (!known) {                                                    // the only expensive step: once per (file, recipe)
             ++previewApply_;
@@ -1073,6 +1085,7 @@ void WatermarkPanel::refreshPreview() {
             }
             afterFiles_[key] = after;
         }
+        applyLock.unlock();
         if (stale()) return;
         if (after.isEmpty()) { res->second = res->first; return; }
         res->second = std::make_shared<wm::PageDrawing>(wm::drawPage(fsPath(after), page));
@@ -1080,7 +1093,12 @@ void WatermarkPanel::refreshPreview() {
     }, [=] {
         if (gen != previewGen_.load() || !res->first) return;
         view_->setDrawings(res->first, res->second ? res->second : res->first);
-        removedLbl_->setText(view_->removedCount() ? tr("本页将去除 %1 个图元").arg(view_->removedCount()) : tr("本页没有要去除的内容"));
+        bool pixels = false;   // full-page image whose coloured watermark is taken out pixel by pixel
+        if (res->second && res->second != res->first)
+            for (size_t k = 0; k < res->first->items.size() && k < res->second->items.size() && !pixels; ++k)
+                if (res->first->items[k].kind == wm::DrawItem::Image && res->second->items[k].kind == wm::DrawItem::Image && res->first->items[k].rgb != res->second->items[k].rgb) pixels = true;
+        removedLbl_->setText(view_->removedCount() ? tr("本页将去除 %1 个图元").arg(view_->removedCount())
+                             : pixels ? tr("本页图片里的彩色水印将逐像素去除（点「去除后」查看）") : tr("本页没有要去除的内容"));
     }, &previewPool_);
 }
 
@@ -1208,11 +1226,25 @@ void WatermarkPanel::startRun(int maxFiles) {
     refreshRun();
     if (jobs->empty()) { running_ = false; refreshRun(); syncChrome(); emit runFinished(); return; }
     QPointer<WatermarkPanel> self(this);
-    async([this, self, jobs] {
-        for (auto& j : *jobs) {
+    // one task per file: files are independent, so the whole pool works on them side by side
+    auto remaining = std::make_shared<int>((int)jobs->size());
+    auto finish = [this, remaining] {
+        if (--*remaining > 0) return;
+        running_ = false;
+        cancel_ = false;
+        refreshRun();
+        syncChrome();
+        QDir().mkpath(outDir_);
+        int ok = 0; for (auto& f : files_) if (f.status == WmFile::Done || f.status == WmFile::NeedsCheck) ++ok;
+        if (ok) writeReport(outDir_ + QString::fromUtf8("/去水印报告.csv"));
+        emit runFinished();
+    };
+    for (size_t n = 0; n < jobs->size(); ++n) {
+        async([this, self, jobs, n] {
+            Job& j = (*jobs)[n];
             if (cancel_) {
                 QMetaObject::invokeMethod(self.data(), [self, i = j.i] { if (self) { self->files_[i].status = WmFile::Skipped; self->files_[i].note = tr("已取消"); self->refreshRun(); } }, Qt::QueuedConnection);
-                continue;
+                return;
             }
             QMetaObject::invokeMethod(self.data(), [self, i = j.i] { if (self) { self->files_[i].status = WmFile::Running; self->refreshRun(); } }, Qt::QueuedConnection);
             wm::FileResult r;
@@ -1249,17 +1281,8 @@ void WatermarkPanel::startRun(int maxFiles) {
                 else { f.status = WmFile::Failed; f.note = u8(r.error); }
                 self->refreshRun();
             }, Qt::QueuedConnection);
-        }
-    }, [this] {
-        running_ = false;
-        cancel_ = false;
-        refreshRun();
-        syncChrome();
-        QDir().mkpath(outDir_);
-        int ok = 0; for (auto& f : files_) if (f.status == WmFile::Done || f.status == WmFile::NeedsCheck) ++ok;
-        if (ok) writeReport(outDir_ + QString::fromUtf8("/去水印报告.csv"));
-        emit runFinished();
-    });
+        }, finish);
+    }
 }
 
 QString WatermarkPanel::summaryText() const {
@@ -1314,6 +1337,10 @@ void WatermarkPanel::refreshRun() {
         runConvert_->setVisible(n > 0);
         runConvert_->setEnabled(!running_ && n > 0);
         runConvert_->setText(tr("转 PLT→PDF（%1 个）· Ctrl+Enter").arg(n));
+        const int np = cleanedPdfFiles().size();
+        runStamp_->setVisible(np > 0); runStampCfg_->setVisible(np > 0);
+        runStamp_->setEnabled(!running_ && np > 0); runStampCfg_->setEnabled(!running_ && np > 0);
+        runStamp_->setText(tr("添加水印（%1 个）").arg(np));
     }
     syncChrome();
 }

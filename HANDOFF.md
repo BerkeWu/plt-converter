@@ -214,3 +214,20 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 - `State`：默认 margin 0 / lineWidth 0.1 / ignoreFrame true；新增 `fileTag`（单文件）、`blanked`（QStringList，「行-列」标签）。`loadSettings` 设置版本 3 才读取旧的边距/重叠/线宽/校准框。批量的文件名开关仍是 `BatchOptions::fileTag`（默认 false，面板里的单文件开关在批量模式隐藏；单→批 `convertToBatch` 会带过去）。
 - 手动空白页：`layout::buildPlan` 对 `blankLabels` 里的格子清空纸样线条、`manual=true`、不被 skipEmpty 丢弃；`chooseOrientation/autoOffset` 忽略它。`MainWindow::setPagesBlank/updateBlankButtons/pageContextMenu`；`applyState` 在几何/选区变化时清空；批量 `deriveState` 保留每个文件自己的 `blanked`。
 - 测试隔离：test_gui / test_wmgui 通过 `XDG_CONFIG_HOME` 隔离设置（之前会污染 ~/.config 导致默认值断言偶发失败）。
+
+
+## 第十九轮：性能回调
+- 第十六轮为防 CPU 暴走把水印线程限为 ≤3、低优先级、预览单线程、文件串行，实际过慢。现在：`workPool_` = clamp(核数−1, 2, 8) 正常优先级；`previewPool_` = 2 线程 + `applyMutex_`；`startRun` 每文件一个 `async` 任务，用 `remaining` 计数收尾。
+- `applyRecipe`：不再先 `analyze` 再 `remove`（`remove` 返回 `kNothingToRemove` 视为“没有可去除”）；`countStrokes(in)` 用 `std::async` 并行，`verify=false` 时两次计数都跳过。
+- `isOp()`、`fastDeflate()`（`Pl_Flate::setCompressionLevel(3)`，进程级设置）。
+- 已知：新聚类逻辑下文档1型的得分证据文字变了（例如 A_artifact 100→85，仍为 High，仅缺「内容和位置完全相同/Artifact/PieceInfo」加分项）；如需恢复可在 `detectArtifacts` 簇分支补这些证据。
+
+
+## 第二十轮：位图彩色水印去除 + 一键添加水印
+- `core/wm/bitmap.{h,cpp}`：模型 pixel = (1-a)·c·(1,1,1) + a·W。色度向量 q = p − mean(p) 指向固定方向 u，|q| = a·K；K、mean(W) 由「叠在白纸」(mean>120) 与「叠在黑线」(mean<70) 两组样本的中位数比值解出。`fit` 拒绝条件：彩色像素 <0.05%、色相一致 <93%、饱和像素（色度>70）>5%（= 纸样本身是彩色，如 E_bitmap 的蓝线）。`clean`：max−min≤4 的像素不动；色度>75 或色相不符的不动；c≥200 记为纸白；字形边缘 2px 内 ≥215 及全图 ≥244 的近白像素刷成 255。
+- `detectBitmap` 抽样 3 页（首/中/尾）拟合，结果放 `Finding::bitmapModel`；`remove()` 对每页 ≥25 万像素的图片逐张清理（同一对象只做一次），`RemoveResult::imagesCleaned/pixelsChanged`，计入 `FileResult::removedTotal()`。
+- `drawPage` 现在给图片返回 `DrawItem::Image`（≤1400px 预览像素），`DrawView` 按 CTM 画出；审阅提示「本页图片里的彩色水印将逐像素去除」。
+- `wm::addWatermark(in,out,StampSpec)`：`insertionSlots` 找可插入位置（BT/ET 外、无标记内容、不在建路径中、无裁剪；且在最后一个大面积不透明绘制之后——Do/sh/内联图/面积>2% 的填充），单元 = `q [tile×inv(CTM)] cm /GSnnn gs r g b rg <path> f Q`，ExtGState 名称随机 `/GS100..999`，`/BM /Multiply`。`pdfwm stamp-boxes in out` 为调试命令。
+- `qt/Stamp.{h,cpp}`：`StampSettings`（QSettings 组 `stamp`）、`buildStampSpec`（字体 200px/em 建轮廓再缩放，每字一个 piece）、`StampDialog`（带正片叠底预览）、`runStampFlow`（后台线程 + 进度框；`PLT_NO_DIALOGS` 环境变量用于测试时不弹结果框）。
+- 测试：test_wm K 段（去色、黑线像素数不变、批量配方路径校验通过、E_bitmap 被拒绝且原因正确），test_wmgui `stampIsPlainContent`（无新标记、线条/文字数不变、一键流程输出 `_水印`）。
+- 未验证：没有在真实 WPS 里试过「删除水印」；设计依据是它识别水印所依赖的结构标记，本实现一个都不产生。

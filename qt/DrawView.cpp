@@ -1,6 +1,8 @@
 #include "DrawView.h"
 
 #include <QFont>
+#include <QImage>
+#include <QTransform>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -185,6 +187,19 @@ void DrawView::paintItems(QPainter& p, const wm::PageDrawing& d, const QRectF& r
                 p.setBrush(Qt::NoBrush);
                 p.drawRect(QRectF(0, -px * 0.8, px * 0.6 * std::max(1, it.glyphs), px * 0.8));
             }
+            p.restore();
+            break;
+        }
+        case wm::DrawItem::Image: {
+            if (it.pts.size() < 4 || it.iw <= 0 || it.ih <= 0 || it.rgb.size() < size_t(it.iw) * it.ih * 3) break;
+            // pts: image corners (0,0) (1,0) (1,1) (0,1) in page space; image row 0 is the top edge (0,1)-(1,1)
+            const QPointF tl(X(it.pts[3].first), Y(it.pts[3].second)), tr(X(it.pts[2].first), Y(it.pts[2].second)), bl(X(it.pts[0].first), Y(it.pts[0].second));
+            const QImage img(it.rgb.data(), it.iw, it.ih, it.iw * 3, QImage::Format_RGB888);
+            const QTransform t((tr.x() - tl.x()) / it.iw, (tr.y() - tl.y()) / it.iw, (bl.x() - tl.x()) / it.ih, (bl.y() - tl.y()) / it.ih, tl.x(), tl.y());
+            p.save();
+            p.setTransform(t, true);
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            p.drawImage(QPointF(0, 0), img);
             p.restore();
             break;
         }

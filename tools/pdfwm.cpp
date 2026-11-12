@@ -40,6 +40,14 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+    if (cmd == "stamp-boxes") {   // debugging: tile a stamp of three plain boxes (text outlines need the GUI's fonts)
+        if (argc < 4) return 2;
+        wm::StampSpec sp; sp.w = 90; sp.h = 20;
+        for (int k = 0; k < 3; ++k) { wm::StampPath p; p.ops = "MLLLZ"; double x = -45 + k * 32; p.pts = {x, -10, x + 26, -10, x + 26, 10, x, 10}; sp.pieces.push_back(p); }
+        auto r = wm::addWatermark(in, wm::fromU8(argv[3]), sp);
+        std::printf("%s pages %d units %d %s\n", r.ok ? "ok" : "FAIL", r.pages, r.units, r.error.c_str());
+        return r.ok ? 0 : 1;
+    }
     if (cmd == "remove") {
         std::filesystem::path out; std::vector<int> also;
         for (int i = 3; i < argc; ++i) {
@@ -50,7 +58,7 @@ int main(int argc, char** argv) {
         if (out == in) { std::fprintf(stderr, "输出不能覆盖原文件\n"); return 2; }
         auto r = wm::remove(in, out, also);
         if (!r.ok) { std::fprintf(stderr, "失败: %s\n", r.error.c_str()); return 1; }
-        std::printf("已写出 %s：去除叠加对象 %d 个，文字块 %d 个，填充 %d 个，还原线条色 %d 处，店铺信息栏元素 %d 个\n", wm::toU8(out).c_str(), r.formsRemoved, r.textBlocksRemoved, r.fillsRemoved, r.coloursRestored, r.blockItemsRemoved);
+        std::printf("已写出 %s：去除叠加对象 %d 个，文字块 %d 个，填充 %d 个，还原线条色 %d 处，店铺信息栏元素 %d 个，图片去色 %d 张\n", wm::toU8(out).c_str(), r.formsRemoved, r.textBlocksRemoved, r.fillsRemoved, r.coloursRestored, r.blockItemsRemoved, r.imagesCleaned);
         return 0;
     }
     if (cmd == "make-recipe") {

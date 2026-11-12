@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+#ifdef PLT_WITH_WM
+#include "Stamp.h"
+#endif
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -1520,10 +1523,16 @@ void MainWindow::showExportDone(const QString& out) {
                     tr("已生成：%1\n\nPDF 为 1:1 实际尺寸，打印时请选择【实际大小】或【100%】，切勿选择【适应页面】。").arg(QDir::toNativeSeparators(out)), QMessageBox::NoButton, this);
     auto* openFile = box.addButton(tr("打开文件"), QMessageBox::ActionRole);
     auto* openDir = box.addButton(tr("打开所在文件夹"), QMessageBox::ActionRole);
+#ifdef PLT_WITH_WM
+    auto* stamp = box.addButton(tr("添加水印"), QMessageBox::ActionRole);
+#endif
     box.addButton(tr("关闭"), QMessageBox::RejectRole);
     box.exec();
     if (box.clickedButton() == openFile) QDesktopServices::openUrl(QUrl::fromLocalFile(out));
     else if (box.clickedButton() == openDir) QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(out).absolutePath()));
+#ifdef PLT_WITH_WM
+    else if (box.clickedButton() == stamp) runStampFlow({out}, this);
+#endif
 }
 
 // ---------------------------------------------------------------- settings / lifecycle
