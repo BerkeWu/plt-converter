@@ -37,10 +37,12 @@ class QRadioButton;
 class Swatch;
 class QHBoxLayout;
 class ToggleSwitch;
+class WatermarkPanel;
+class StampPanel;
 
 struct PageMeta {
     int row = -1, col = -1;
-    bool overview = false, empty = false;
+    bool overview = false, empty = false, manual = false;   // manual: set to blank by the user
     double w = 0, h = 0;
     QString label;
 };
@@ -105,12 +107,14 @@ struct BatchUi {
     QWidget *queueBox = nullptr, *rightHost = nullptr, *leftHost = nullptr, *infoBox = nullptr, *actionBox = nullptr, *toggleBar = nullptr, *bottomBar = nullptr;
     QComboBox* filter = nullptr;
     QListWidget* queueList = nullptr;
-    QLabel *posLbl = nullptr, *compare = nullptr, *hintLbl = nullptr, *sumLbl = nullptr, *overrideNote = nullptr;
+    QLabel *posLbl = nullptr, *compare = nullptr, *hintLbl = nullptr, *sumLbl = nullptr, *overrideNote = nullptr, *shapeNote = nullptr;
     QPushButton *prev = nullptr, *next = nullptr, *applyHint = nullptr, *confirm = nullptr, *restoreAuto = nullptr, *restoreTmpl = nullptr, *applyFollow = nullptr, *confirmAll = nullptr, *exportBtn = nullptr, *tabLayout = nullptr, *tabShape = nullptr;
     // step 5: export
     QRadioButton *outSource = nullptr, *outCustom = nullptr;
     QLabel *outDirShow = nullptr, *expSummary = nullptr, *expTime = nullptr;
-    QPushButton *outChoose = nullptr, *expStart = nullptr, *expPause = nullptr, *expCancel = nullptr, *expOpen = nullptr, *expCsv = nullptr, *expRetry = nullptr, *expBack = nullptr;
+    QPushButton *outChoose = nullptr, *expStart = nullptr, *expPause = nullptr, *expCancel = nullptr, *expOpen = nullptr, *expCsv = nullptr, *expRetry = nullptr, *expBack = nullptr, *expStamp = nullptr;
+    QCheckBox* stampOnExport = nullptr;          // 「导出时添加水印」(needs PLT_WITH_WM)
+    QPushButton* stampSettingsBtn = nullptr;
     QSpinBox* concurrency = nullptr;
     QProgressBar* expBar = nullptr;
 };
@@ -132,9 +136,18 @@ public:
     int frameRemoved() const { return frameRemoved_; }   // lines removed by 「忽略纸张边框」 in the current drawing
     int workLineCount() const { return work_ ? int(work_->lines.size()) : 0; }
     bool planValid() const { return havePlan_; }
+    void blankPages(const QVector<int>& rows, bool blank) { setPagesBlank(rows, blank); }   // 手动空白页（预览里的按钮 / 右键菜单走同一入口）
 
     // ---- batch conversion (PRD module 5) ----
     void setBatchMode(bool on);
+    // ---- watermark removal (needs the QPDF-based core; see CMake option PLT_WITH_WM) ----
+    void showWatermark(bool on);
+    bool watermarkVisible() const;
+    WatermarkPanel* watermarkPanel();
+    // ---- standalone "加水印" mode: same core as the "添加水印" buttons elsewhere, its own file list ----
+    void showStamp(bool on);
+    bool stampVisible() const;
+    StampPanel* stampPanel();
     bool batchMode() const { return batch_; }
     void goBatchStep(int step);                          // 0 添加文件, 1 通用参数, 2 自动排版, 3 逐一预览, 4 批量导出
     void addBatchFiles(const QStringList& paths);        // files and/or folders
@@ -165,6 +178,11 @@ protected:
     void closeEvent(QCloseEvent*) override;
 
 private:
+    QStackedWidget* rootStack_ = nullptr;
+    WatermarkPanel* wmPanel_ = nullptr;
+    QPushButton* modeWm_ = nullptr;
+    StampPanel* stampPanel_ = nullptr;
+    QPushButton* modeStamp_ = nullptr;
     // construction
     QWidget* buildTopBar();
     QWidget* buildImportPanel();
@@ -181,6 +199,7 @@ private:
     QWidget* buildBatchBottomBar();
     QWidget* buildBatchToggleBar();
     void setBatchTab(bool shape);
+    QString shapeSummary(const State& s, bool frameDetected) const;
     void batchAddDialog(bool folder);
     QWidget* buildBatchAddPanel();
     QWidget* buildBatchAutoPanel();
@@ -247,12 +266,15 @@ private:
     void updateInfoLabels();
     void updateSummary();
     void rebuildThumbLists();
+    void setPagesBlank(const QVector<int>& rows, bool blank);   // 手动空白页：把选中的页设为空白 / 恢复内容
+    void updateBlankButtons();
+    void pageContextMenu(QListWidget* list, const QPoint& pos);
     // actions
     void chooseFile();
     void onParsed(const ParseResult& r, const QString& path);
     void onExport();
     QString exportWithProgress(const QString& out, const QVector<int>& pages);
-    void showExportDone(const QString& out);
+    void showExportDone(const QString& out, bool alreadyStamped = false);
     QString defaultOutputName(bool* truncated = nullptr) const;
     QVector<int> checkedPages() const;
     void applyPageRange();
@@ -281,6 +303,8 @@ private:
     QTimer planTimer_, saveTimer_;
     quint64 gen_ = 0;
     QVector<PageMeta> meta_;
+    QStringList reselect_;                 // page labels to select again after the lists are rebuilt
+    QPushButton *blankBtn_ = nullptr, *unblankBtn_ = nullptr;
     QVector<QImage> thumbs_;
     PlanResult last_;
     bool havePlan_ = false;
@@ -296,6 +320,7 @@ private:
     State tmpl_;
     BatchOptions opts_;
     QVector<std::shared_ptr<BatchItem>> items_;
+    bool planRunning_ = false, planDirty_ = false;
     int nextId_ = 1, cur_ = -1;
     QThreadPool scanPool_, autoPool_, exportPool_, loadPool_;
     int scanPending_ = 0, autoPending_ = 0, autoTotal_ = 0;
@@ -329,6 +354,7 @@ private:
     QPushButton *openBtn_ = nullptr, *selBtn_ = nullptr, *clearSelBtn_ = nullptr, *toLayoutBtn_ = nullptr, *resetXformBtn_ = nullptr;
     QProgressBar* busy_ = nullptr;
     QLabel *impInfo_ = nullptr, *impNotes_ = nullptr, *xformNote_ = nullptr, *selInfo_ = nullptr;
+    QLabel* impDrag_ = nullptr;   // single-file hint about dropping files (hidden in batch)
     QCheckBox* ignoreFrame_ = nullptr;
     QLabel* frameNote_ = nullptr;
     QRadioButton *clipRadio_ = nullptr, *wholeRadio_ = nullptr;
@@ -338,6 +364,8 @@ private:
     QLabel *paperNote_ = nullptr, *orientNote_ = nullptr;
     QCheckBox* autoOrient_ = nullptr;
     QSlider* overlapSlider_ = nullptr;
+    ToggleSwitch* fileTagSw_ = nullptr;
+    QWidget* fileTagRow_ = nullptr;
     QDoubleSpinBox *overlapSpin_ = nullptr, *marginSpin_ = nullptr, *lineWidthSpin_ = nullptr, *calibSpin_ = nullptr, *xSpin_ = nullptr, *ySpin_ = nullptr;
     ToggleSwitch *singleSw_ = nullptr, *pageNoSw_ = nullptr, *calibSw_ = nullptr, *overviewSw_ = nullptr, *alignSw_ = nullptr, *blankSw_ = nullptr;
     QLabel* colorNote_ = nullptr;
@@ -349,4 +377,6 @@ private:
     QLabel *summary_ = nullptr, *rangeErr_ = nullptr, *selCount_ = nullptr, *nameLbl_ = nullptr;
     QLineEdit* rangeEdit_ = nullptr;
     QPushButton* exportBtn_ = nullptr;
+    QCheckBox* stampOnExport_ = nullptr;         // single-file export: 「导出时添加水印」(needs PLT_WITH_WM)
+    QPushButton* stampSettingsBtn_ = nullptr;
 };

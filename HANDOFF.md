@@ -119,3 +119,139 @@ https://claude.ai/artifact/Dqr3rPDZWbThHJgnxhyQvK （两个界面：单文件排
 **批量转换**：导出、缩略图、页数估算、优化提示、逐一预览全部走同一个引擎，随之调整；批量测试（20 文件上限、损坏文件隔离、方向与穷举一致、暂停取消重试、优化提示交互）全部通过。
 
 **注意**：样例 PDF 80.pdf 带有第三方店铺的斜铺水印，只用作拼接版式参考，没有对它做任何处理。
+
+---
+## 第八轮：去水印核心模块（feature/watermark 分支，未合入主线）
+用户提供 5 组真实带水印 PDF（A–E）。需求分析与实测结论见 Claude Docs 需求文档“样例实证”一节，设计稿见 Design 画布“去水印功能设计稿”。
+
+**代码**
+- `core/wm/wm.h/.cpp`：`wm::analyze()` 逐对象打分分档（High ≥75 / Confirm 45–74 / Keep），`wm::remove()` 重写内容流；`toJson()` 供界面使用。
+  - 独立叠加对象：按（表单内容哈希、矩阵、不透明度）分组；斜置、半透明、跨页相同、Artifact 标记、KSPX 记号、只含文字各自加分；去除时整块拿掉 `q cm BDC…EMC Q`，并从页面资源里删除该表单和图形状态，使水印文字不再留在文件里。
+  - 压平文字：找到数量最多的斜置同字号文字串，其中最浅的颜色为水印色 G；其余颜色是被混色的线条。混色模型 blended = (1-α)·原色 + (G-(1-α))，α 在 5%–60% 里拟合；候选原色里取出现次数最多且误差 <0.06 的，否则解析反推。去除 G 色文字块、G 色填充（f→n，B→S），并把混色还原成原色。
+  - 页码类（正向、不透明、各页内容不同）归为 PageStamp，默认保留（样例 C 的“第 1/6 页”）。
+  - 整页位图（图片面积 ≥60% 的页占一半以上）归为 Bitmap，拒绝处理。
+  - 联系方式文字只记标志位 `contactText`，不保存原文。
+- `tools/pdfwm.cpp`：`pdfwm analyze in.pdf [--json]`、`pdfwm remove in.pdf -o out.pdf [--also 序号]`，不覆盖原文件。
+- `tests/test_wm.cpp` + `tests/data_wm/`（样例副本，仅供开发，勿外传）：A 去除后与用户的无水印版指令数完全一致且资源里无 KSP 残留；C、D 去除后再分析找不到斜铺水印、几何指令数不变、页码表单保留；E 被拒绝。
+- `prototype/watermark/`：Python 原型（对照用，C++ 输出与其逐像素一致）。
+
+**验证（渲染对比）**：A 去除后与无水印版 10 页差异 0 像素；C/D 浅灰水印像素 C 页1 43160→1654、D 页1 24158→232；`qpdf --check` 通过。
+
+**构建**：需要 libqpdf（Ubuntu：`apt install libqpdf-dev`）。缺库时 CMake 自动跳过 pltwm / pdfwm / test_wm。Windows 打包尚未带上 QPDF（下一步：GitHub Actions 里用 vcpkg 安装 qpdf，并把 qpdf29.dll 等放进安装包）。
+
+**已知缺口**：样例 B（同层店铺信息栏）需要“范围扩展”；D 样例第 3 页仍有约 4900 个浅灰像素，可能是纸样里本来就有的深灰圆环，待查；GBK 编码的联系方式关键词（微信、小红书）暂不能识别，目前只靠 ASCII 账号模式；输出文件名与保存位置、界面接入未做。
+
+**打包（第八轮补充）**：分支版本号为 1.1.0-dev（`VERSION`、安装脚本、构建脚本一致），安装包名 `PLT-Converter-Setup-1.1.0-dev.exe`，与正式 1.0.0 区分。GitHub Actions 里先用 vcpkg 装 `qpdf:x64-windows`，`build_windows.ps1 -VcpkgRoot` 把 vcpkg 工具链传给 CMake，并把 `pdfwm.exe` 与 QPDF 运行库复制进安装目录。安装包里新增开始菜单项“去水印（把PDF拖到这里）”，对应 `watermark_drop.bat`：先显示检测结果，再把去水印后的文件写到原文件旁边（`原名_去水印.pdf`），不覆盖原文件。界面尚未接入，这是给实机验证用的临时入口。
+**未在 Windows 上验证**：QPDF 头文件在 vcpkg 最新版（12.x）需要 C++20，所以水印库单独按 C++20 编译，其余仍是 C++17；Linux 上已用 QPDF 11.9 通过测试，12.x 的接口差异需在 Actions 里确认。
+
+
+## 第九轮：批量「逐一预览」补齐图形功能 + 提示条遮挡（v1.0.1，分支 fix/batch-preview，本次合并并入）
+- 用户反馈：批量逐一预览缺「忽略纸张边框」「框选区域」，且预览框底部提示文字遮挡图形。
+- 排查：这两个功能在批量里数据通路本来就通（`State.ignoreFrame/hasSel/sel/selClip` → `deriveState` → 导出走 `buildFullDoc/cropWorkDoc`），问题是入口难发现：共用的导入面板在批量里带着单文件才需要的说明/文件信息，控件被挤到滚动区外。
+- 改动：`MainWindow::syncUi` 批量下隐藏 `impDrag_/impInfo_`；页签改名「图形与选区」并在有图形编辑时加「●」；信息卡新增 `bu_.shapeNote`（`shapeSummary()`）。
+- 提示条：`CanvasWidget` 新增 `reserve_/viewH()`，提示条占用底部独立条带，`refit/actualSize/focusCell/比例尺/可见区域` 全部改用 `viewH()`，绘制裁剪到上方区域。
+- 测试：`tests/test_batch.cpp` 增加逐一预览的忽略边框 / 框选 / 摘要 / 撤销用例。ctest 3/3 通过（Qt 6 offscreen，当时在 main 分支独立验证）。
+- 合并记录：这是 `main` 分支上独立发布的 v1.0.1，当时未合入 `feature/watermark`。本次（第二十一轮）合并时发现它附带提交了一份 `build/` 编译产物目录（271 个文件），已在合并时剔除并补了 `.gitignore`，不影响这里列的功能性改动；代码部分（`CanvasWidget.*`、`MainWindow.*`、`MainWindowBatch.cpp`、`test_batch.cpp`）与 `feature/watermark` 分支无重叠，`git merge` 自动合并、零冲突。
+
+
+## 第十轮：用户实测漏检（Acrobat 背景/水印写法）
+- 现象：用户的 2426 女士飘带领衬衫（22 页，Microsoft Print To PDF 输出后用 Acrobat 加「背景」水印）WPS 里有水印、苹果文稿里没有，拖到 watermark_drop.bat 显示「7 页/发现 0 项」（注：用户截图是另一份文件；本样例为后发的 22 页文件，同属此类）。
+- 原因：水印是页面里 `/Artifact <</Subtype /Background>> BDC q /GS0 gs /Fm0 Do Q EMC`，倾斜角（Tm）和透明度（gs，0.39/0.33）都在 Form 内部；旧逻辑只看 `Do` 外层矩阵与透明度，且 Form 里有白色填充矩形被当作「非纯文字」，得分仅 30 被归为页码类保留。
+- 修复：`scanForm()` 读取 Form 内部首个文字的倾斜角、最低透明度；白色填充/描边的图形不计入「非文字」；`PieceInfo/ADBE_CompoundType` 加 10 分。得分 95，默认去除。去除后各页仅水印区域像素变化，封面页不变。
+- 测试：`tests/data_wm/G_acrobat_bg.pdf`（原文件前 6 页）+ `test_wm` 新增 G 段。ctest 4/4 通过。
+
+
+## 第十一轮：B 型（同层店铺信息栏）
+- 样例：F54 吊带包屁衣66（有/无水印，8 页）。信息栏（SNOW 标志、小红书/微信图标、联系方式、灰色底块）直接画在页面内容流里，与纸样同一图层；第 1 页另有「5cm 测试框」里的小号联系方式 + 二维码 + 黄色底块。用户提供的「无水印」版是 WPS 重新导出的，指令序列对不上，只能做像素对比。
+- 算法（core/wm/wm.cpp `traceEvents` / `detectBlocks`）：把每页内容流拆成事件（文字、路径填充/描边、Do 图片/表单），记录页面坐标包围盒。
+  1. 种子：联系方式类文字（≥8 位连续数字或 ≥6 位英文字母数字）且在 ≥60% 页重复出现。
+  2. 容器：包围种子的有底色填充块（填充路径或「只含填充」的 Form，面积 <30% 页面）；一并去除，不受区间限制。
+  3. 连续区间：从种子向前后扩展，遇到描边路径或含线条/文字的 Form 就停（纸样线条是描边，不会被卷进来）。
+  4. 区间内、中心落在区域内的：填充路径、图片、只含填充的 Form 去除；文字只去种子和「每页同位置相同」的品牌字/图标（n≥3）。逐页变化的页码文字、只出现 1 页的「5cm 测试框」文字保留。
+  5. 去除时只删路径构造+填充指令，不删颜色/状态指令；不再被引用的图片、Form 从页面资源里摘除，二维码不会留在文件里。
+- 评分：重复 +40/+25、同位置 +15、压在底色块上 +15、面积 ≤10% +10、带每页相同品牌字/图标 +10；≥75 默认去除。F54 得分 90。
+- 验证：与用户无水印版逐页像素对比，差异 <0.15%（抗锯齿）；第 5 页用户的「无水印版」里其实还留着 SNOW 字样，我们去得更干净。所有无水印文件、A/C/D/E/G 样例、80.pdf 无新误报。ctest 4/4。
+- 已知限制：信息栏如果没有联系方式类文字（只有图标/店名）则不会被识别；图片水印/整页位图仍无法处理；本版未在 Windows 实机验证。
+
+
+## 第十二轮：去除指定文字（用户需求：用户填写或选中指定内容）
+- 样例：f57c0ada「小红叶501」（10 页，Microsoft Print To PDF）。PDF 里没有字体/文字，字符是 CAD 单线字体画成的短折线，每笔一个 `q cm m l.. S Q`。因此「输入文字」对这类文件无从匹配，只能「框选一次」。
+- `wm::removeShape(in,out,page,rect,everywhere)`（rect 为页面左上角为原点、单位 pt）：选框内完整落入的描边线 = 选中笔画组；以点数最多的 ≤6 笔为锚，在各页找同点数笔画，枚举 镜像×4 旋转×2 方向，最小二乘估缩放（0.3–3 倍），再整组校验（允许 ≤10% 缺失；缺失笔画若落在页边缘/页外视为被页边切断，要求至少命中 max(3, 25%) 笔），命中后用所有匹配点二次拟合再匹配。只删路径构造 + 描边指令，保留颜色/线宽状态。容差 0.35pt（源坐标在 0.16pt 网格上）。
+- `wm::listText/removeText`：解析 ToUnicode（bfchar/bfrange、codespace 宽度），Type0 默认 2 字节，无 ToUnicode 时按 Latin-1。去除 = 删掉含目标子串的 Tj/TJ。对线条字给出明确报错（提示改用框选）。
+- 验证：f57c0ada 框选第 2 页「小红叶」13 笔 → 共去除 106 笔，涉及第 1–8 页（不同字号、180° 旋转、被页边切断的都命中），第 9–10 页本无此字；被去除线条最大 41pt，纸样轮廓线未动；「501」「面料A」保留。
+- 待做：GUI（水印页里加「去除文字」：输入框 + 文字列表勾选 + 画布框选）；把框选的笔画组存成命名模板（如「小红叶」），以后输入名称即可跨文件去除；整字级匹配（只删「小红叶」不动单独出现的「叶」）目前靠整组校验，页边切断的情形只要求 25% 笔画命中。
+
+
+## 第十三轮：水印处理界面 + 批量去水印（设计稿 6–11，用户确认：批量上限 20 个、阈值 75、其余按稿）
+- 设计稿（Design artifact「去水印功能设计稿」）新增画板：6 去除指定文字（按内容）、7 框选图形（线条字）、8 批量添加文件并自动分组、9 配方设置与试跑、10 运行与报告、11 差异/校验失败/自动套用弹窗。
+- 核心（core/wm）：`ShapeTemplate`、`extractShape`、`removeShapeTemplate`（`removeShape` 重构为 `shapeImpl`，模板作为「虚拟页」参与匹配）；`Recipe`、`signatureOf`、`conformity`、`groupReports`、`saveRecipe/loadRecipe`、`countStrokes`、`applyRecipe`（检测→指定文字→各图形模板，逐步写临时文件，最后按「线条数 = 原有 − 图形模板去除数」校验）；`drawPage`（矢量预览，递归进 Form，贝塞尔取 8 点折线，位图只画虚线框，无 ToUnicode 的双字节旧字体不画字）。
+- CLI：`pdfwm group`、`make-recipe`、`batch --recipe --out`。
+- Qt：`qt/WatermarkPanel`（三步）、`qt/DrawView`（预览 + 橡皮筋框选，原图/去除后的差异用「图元几何键」多重集合比较，不需要逐项目关联）。MainWindow 用 QStackedWidget 包了一层，顶栏第三个模式按钮；`plt_gui --watermark [文件…]` 直接进入。
+- 测试：`test_wm`（分组、配方存取、吻合度、校验、模板）、`test_wmgui`（20 个上限、完整流程含框选图形与文字、不覆盖原件、嵌入主窗口）。ctest 5/5。
+- 取舍/限制：①「需确认」项只能在单文件（组内只有 1 个文件）时勾选并一并去除，批量只自动去除「默认去除」项；②配方里的指定文字对同组文件按子串匹配，图形模板按形状匹配，二者不依赖检测；③预览不是位图渲染：不画图片内容、渐变/图案、剪裁路径，页面旋转（/Rotate）未处理，无 ToUnicode 的 GBK 字体文字显示为空；④批量按顺序单线程处理，20 个文件取决于页数；⑤Windows 打包/QPDF 12 未实机验证；⑥吻合度是启发式（均分 − 30×缺失 − 8×多余）。
+
+
+## 第十四轮：PLT 线条字去除（用户需求：处理 plt 中「小红叶」类文字，输出仍为 plt，可快捷键进入 plt 转 pdf）
+- 解析器 `core/plt.cpp` 为每条折线记录源文本区间（`Polyline.src`）和是否可编辑（`editable`；含 AA/AR/AT/RT 圆弧的线不可编辑）。
+- `core/pltedit.cpp`：`extractTemplate`（框内完整落入的线 = 模板）、`findTemplateCopies`（相似变换匹配：镜像×4 旋转×正反方向，最小二乘缩放 0.3–3 倍，≥3 点锚笔画，网格索引，容差 0.12 mm）、`removeLines`（不重新生成文件：PD→PU，PA/PR 包成 `PU;…PD;`，CI/EA/ER 丢弃，其余字节不动，笔位不变，所以后面的相对移动仍正确）。
+- `WatermarkPanel`：`.plt` 进入「PLT」组；预览用 plt::Document 在内存里画前/后（单位 mm，四周留 10 mm）；框选坐标换算回 mm；运行时每个文件按配方里的图形模板找线 → `removeLines` → 重新解析校验线条数 = 原有 − 去除数 → 写 `原名_去水印.plt`。第三步出现「转 PLT→PDF（n 个）· Ctrl+Enter」，发出 `convertRequested`，MainWindow 接上：1 个文件→`loadFile`（单文件模式），多个→批量转换 `addBatchFiles`。
+- 测试：test_core（PLT 块：相对移动、镜像/放大/旋转 180、弧不可编辑、模板复用）、test_wmgui `pltLabelFlow`（3 个 PLT、含 1.5 倍副本、框选→运行→输出可解析→原件不变→Ctrl+Enter 离开水印页）。
+- 未验证：真实 CAD 导出的带「小红叶」PLT（字符可能用圆弧/曲线或点很多的笔画，需要样本）；Windows 实机；Ctrl+Enter 在批量页是否与既有快捷键冲突（未发现）。
+
+
+## 第十五轮：清除队列 / 预览缩放 / 输出后缀 haoyang
+- `WatermarkPanel::clearQueue()` + 底栏按钮（有配方时二次确认，`setSilent(true)` 跳过确认）；运行中/分析中拒绝。`DrawView` 增加 zoom_/pan_（fitRect 基准 × zoom，滚轮锚点缩放），`pageToWidget` 供测试。输出名后缀常量在 `WatermarkPanel::startRun` 与 `tools/pdfwm.cpp`；CSV 报告名、输出文件夹名「去水印输出」未改。测试 `clearQueueAndZoom`。
+
+
+## 第十六轮：卡顿/风扇狂转/开始处理置灰（用户反馈）
+- 复现：`WM_REAL=文件1;文件2 test_wmgui idleIsQuiet`：2426（22 页）选组后连续翻页 20 次 = 111 CPU 秒。原因见 CHANGELOG。修复在 `WatermarkPanel::refreshPreview`（previewPool_、previewGen_ 原子、pvMutex_ 保护的 drawCache_/afterFiles_、`previewKey` 指纹）。
+- 约定：任何会被「点击/翻页/拖动」触发的后台计算必须 ①单飞或只认最新 ②按 (输入, 参数) 缓存 ③不与「开始处理」抢同一个线程池。新增此类功能时加一个「快速操作 N 次，计算次数不增加」的测试（参考 `previewApplyCount()`）。
+- 测试注意：会话文件 `batch_session.json` 会让下一个 MainWindow 弹「恢复会话」模态框，测试必须清理（`pltToPdfStaysResponsive` 已处理）。
+- 未能复现：用户说的「+VX: xiangersggzs」水印检测不到——手头所有真实样本（2426、17a8ba2f、小童花边、F54、f57c0ada）在最新版的检测结果与旧版一致（core/wm 自 1d9d75d 起未改动）；需要用户提供那份 PDF。
+
+
+## 第十七轮：文档1/文档2 漏检、全类型复查、性能
+- 文档1：Form XObject 内的倾斜灰色文字，每页位置不同 → `detectArtifacts` 用 `textSig` 聚类（`DoRec.textSig`，`Finding.extraKeys` 存同簇其余表单键，`remove()` 一并丢弃）。
+- 文档2：Fill & Sign 嵌套表单（`DoRec.fillSign`，`decodeFormText` 经 ToUnicode 解码），+60，联系方式再 +25；同层平铺倾斜文字在 `detectBlocks` 里 +30（`Ev.angle`）。
+- 性能：`core/wm/wm.cpp` 自写 `Tokenizer`/`Arg`/`Instr`（保留原文字节，序列化不改写数字）；`traceEvents(..., keepPts=false)`；`WatermarkPanel::workPool_`（≤3 线程、低优先级）。仍可优化：`applyRecipe`/`drawPage`/`countStrokes` 各自重复解析整份文件（文档2 首次审阅预览约 7 s，后台单线程、有缓存）。
+- 位图型（e8cf131f）：页面由 11 块 JPEG 拼成，水印在像素里，无独立对象，不可去除。
+- 回归：tests/test_wm.cpp 新增 I、J 两段；ctest 5/5。
+
+
+## 第十八轮：参数区优化 + 手动空白页（单文件/批量共用面板）
+- `qt/Widgets.h`：`ClickSpinBox`（锁定=只读+无按钮，点击/`eventFilter` 解锁，editingFinished/失焦/Esc 重新锁定，`wheelEvent` 一律忽略）、`NoWheelSlider`。无 Q_OBJECT：测试里用 `dynamic_cast`，不要用 `qobject_cast/findChild<ClickSpinBox*>`（会匹配所有 QDoubleSpinBox）。
+- `State`：默认 margin 0 / lineWidth 0.1 / ignoreFrame true；新增 `fileTag`（单文件）、`blanked`（QStringList，「行-列」标签）。`loadSettings` 设置版本 3 才读取旧的边距/重叠/线宽/校准框。批量的文件名开关仍是 `BatchOptions::fileTag`（默认 false，面板里的单文件开关在批量模式隐藏；单→批 `convertToBatch` 会带过去）。
+- 手动空白页：`layout::buildPlan` 对 `blankLabels` 里的格子清空纸样线条、`manual=true`、不被 skipEmpty 丢弃；`chooseOrientation/autoOffset` 忽略它。`MainWindow::setPagesBlank/updateBlankButtons/pageContextMenu`；`applyState` 在几何/选区变化时清空；批量 `deriveState` 保留每个文件自己的 `blanked`。
+- 测试隔离：test_gui / test_wmgui 通过 `XDG_CONFIG_HOME` 隔离设置（之前会污染 ~/.config 导致默认值断言偶发失败）。
+
+
+## 第十九轮：性能回调
+- 第十六轮为防 CPU 暴走把水印线程限为 ≤3、低优先级、预览单线程、文件串行，实际过慢。现在：`workPool_` = clamp(核数−1, 2, 8) 正常优先级；`previewPool_` = 2 线程 + `applyMutex_`；`startRun` 每文件一个 `async` 任务，用 `remaining` 计数收尾。
+- `applyRecipe`：不再先 `analyze` 再 `remove`（`remove` 返回 `kNothingToRemove` 视为“没有可去除”）；`countStrokes(in)` 用 `std::async` 并行，`verify=false` 时两次计数都跳过。
+- `isOp()`、`fastDeflate()`（`Pl_Flate::setCompressionLevel(3)`，进程级设置）。
+- 已知：新聚类逻辑下文档1型的得分证据文字变了（例如 A_artifact 100→85，仍为 High，仅缺「内容和位置完全相同/Artifact/PieceInfo」加分项）；如需恢复可在 `detectArtifacts` 簇分支补这些证据。
+
+
+## 第二十轮：位图彩色水印去除 + 一键添加水印
+- `core/wm/bitmap.{h,cpp}`：模型 pixel = (1-a)·c·(1,1,1) + a·W。色度向量 q = p − mean(p) 指向固定方向 u，|q| = a·K；K、mean(W) 由「叠在白纸」(mean>120) 与「叠在黑线」(mean<70) 两组样本的中位数比值解出。`fit` 拒绝条件：彩色像素 <0.05%、色相一致 <93%、饱和像素（色度>70）>5%（= 纸样本身是彩色，如 E_bitmap 的蓝线）。`clean`：max−min≤4 的像素不动；色度>75 或色相不符的不动；c≥200 记为纸白；字形边缘 2px 内 ≥215 及全图 ≥244 的近白像素刷成 255。
+- `detectBitmap` 抽样 3 页（首/中/尾）拟合，结果放 `Finding::bitmapModel`；`remove()` 对每页 ≥25 万像素的图片逐张清理（同一对象只做一次），`RemoveResult::imagesCleaned/pixelsChanged`，计入 `FileResult::removedTotal()`。
+- `drawPage` 现在给图片返回 `DrawItem::Image`（≤1400px 预览像素），`DrawView` 按 CTM 画出；审阅提示「本页图片里的彩色水印将逐像素去除」。
+- `wm::addWatermark(in,out,StampSpec)`：`insertionSlots` 找可插入位置（BT/ET 外、无标记内容、不在建路径中、无裁剪；且在最后一个大面积不透明绘制之后——Do/sh/内联图/面积>2% 的填充），单元 = `q [tile×inv(CTM)] cm /GSnnn gs r g b rg <path> f Q`，ExtGState 名称随机 `/GS100..999`，`/BM /Multiply`。`pdfwm stamp-boxes in out` 为调试命令。
+- `qt/Stamp.{h,cpp}`：`StampSettings`（QSettings 组 `stamp`）、`buildStampSpec`（字体 200px/em 建轮廓再缩放，每字一个 piece）、`StampDialog`（带正片叠底预览）、`runStampFlow`（后台线程 + 进度框；`PLT_NO_DIALOGS` 环境变量用于测试时不弹结果框）。
+- 测试：test_wm K 段（去色、黑线像素数不变、批量配方路径校验通过、E_bitmap 被拒绝且原因正确），test_wmgui `stampIsPlainContent`（无新标记、线条/文字数不变、一键流程输出 `_水印`）。
+- 未验证：没有在真实 WPS 里试过「删除水印」；设计依据是它识别水印所依赖的结构标记，本实现一个都不产生。
+
+
+## 第二十一轮：软件改名 + 应用图标 + 独立「加水印」模式 + 导出时加水印 + 空格拖拽
+- **背景**：用户提出 4 点需求——①给 PDF 加水印单独开一个入口，支持单个/批量；②PLT→PDF、去水印导出前可以选择加水印，参数（字体/颜色/间隔密度/透明度）可设；③说明当前版本管理方式，保证以后更新互不影响；④先确认计划再开工——确认后追加：水印仍要求 WPS 识别不到；设计一个含「好样」二字的应用图标；单文件 PLT→PDF 后续要出 App/小程序端（提醒 `core/` 保持 Qt 无关）；version 管理问题要「想办法不影响现有功能，不改写代码」来解决（即不做大范围重构，只加新文件/新分支点）。中途又追加：软件改名「好样格式转换」、运行性能不能降、预览面板统一支持空格拖拽。
+- **软件改名**：`qt/MainWindow.cpp` 窗口标题与顶部 logo 文案改为「好样格式转换」；`packaging/installer.iss` 的 `AppName`/`DefaultDirName`/`DefaultGroupName`/`OutputBaseFilename`/`[Icons]`/`[Run]` 文案同步；`packaging/build_windows.ps1`、`.github/workflows/windows-installer.yml` 里的产物文件名（zip/exe）同步改掉。**特意不改**：`QSettings` 的组织名/应用名（`"HaoyangPattern"`/`"PltConverter"`）和 `installer.iss` 的 `AppId` GUID——两者都是已装用户设置/升级识别的键，改名不改这俩，老用户设置和「原地升级」都不受影响。
+- **应用图标**：用 Playwright 截图 + Pillow 重新采样生成多尺寸 `packaging/icon.ico`（16/24/32/48/64/128/256）。设计过程：先出 3 个图形概念，用户要求图标上要出现「好样」两个汉字，于是改为纯文字构图（概念 D/E 两版），用户选定 E 版（满版淡色纸样图纸底纹 + 虚线裁片轮廓 + 居中「好样」大字，红/米色调）；中途我主动提出 E 版底纹在 16px 太淡几乎看不见，建议简化为概念 F，用户先同意「用 E 的构图但简化底纹」，但最终改口「还是用回 E 版吧」——最终产物是未简化的原始 E 版。接入方式：`CMakeLists.txt` 在 `WIN32` 下 `enable_language(RC)` + `configure_file(packaging/app.rc.in → build/app.rc @ONLY)`，`.rc` 里 `IDI_ICON1 ICON` 指向图标绝对路径，并写入 `VS_VERSION_INFO`（公司名「好样纸样」、产品名/描述「好样格式转换」，版本号取自 CMake `PROJECT_VERSION`）；`plt_gui` target 新增 `target_sources(... "${CMAKE_BINARY_DIR}/app.rc")`（仅 WIN32）。`installer.iss` 新增 `SetupIconFile=icon.ico`。**未验证**：没有真实 Windows 环境跑过 `rc.exe`，图标/版本信息在 exe 上的实际显示效果要等 CI 的 Windows 构建才能确认。
+- **新增独立「加水印」模式**（对应需求①）：顶部新增第 4 个按钮「加水印」（`MainWindow::showStamp`/`stampVisible`/`stampPanel`，镜像已有 `showWatermark` 一套），进入全新 `StampPanel`（`qt/Stamp.h/.cpp`）——自己的文件列表，支持拖拽/「添加文件」/移除/清空，不需要先走「去水印」或「PLT→PDF」。内部复用重构后的 `StampForm`（见下）。
+- **导出前可选加水印**（对应需求②）：单文件导出面板（`MainWindow::buildExportPanel`）在导出按钮上方新增「导出时添加水印」勾选框 +「水印设置…」按钮；批量导出页（`MainWindowBatch.cpp`）同样新增一行。勾选后，`onExport()` / `batchStartExport()` 在**已有的**导出完成之后，直接对刚导出好的文件调用 `wm::addWatermark`（通过 `stampOutputPath` 决定最终文件名），而不是额外起一个处理阶段；默认不勾选，不影响现有导出行为。批量路径特别处理：加水印失败时保留未加水印的导出结果而不让整项失败（best-effort）。**性能**：这是直接响应用户「注意运行性能不能太低」的要求——批量加水印复用已有的 `exportPool_` 线程池、在同一个 per-file 任务里顺手做，没有新增一遍文件遍历或新的并行层；全量 ctest 墙钟时间（~63–65s）加入该功能前后无变化。
+- **水印参数拆分与预设**（对应需求②「间隔密度」）：原来单一 `gapMm` 拆成 `gapXMm`/`gapYMm`（横向/纵向独立），并提供稀（45mm）/中（25mm）/密（10mm）三个一键预设按钮（点预设会把两个轴设成同一个值，之后仍可单独微调任一轴，不额外记"自定义"状态）。`StampSettings::load()` 做了向后兼容迁移：若新键不存在但老的单一 `gapMm` 存在，复制到两个新字段；`save()` 始终写新键并删除旧键。
+- **水印引擎本体未动**（对应需求⑤「WPS 不能检测到」+ 需求⑦「App/小程序端复用」）：`core/wm/wm.h/.cpp` 的 `addWatermark`/`StampSpec`/`insertionSlots` 这次完全没有改动逻辑——它原本就是 Qt/Windows 无关的（只用 QPDF + `std::filesystem`），本来就满足「一套内核，多端复用」。评估过是否要把它物理搬进独立的 `core/stamp/` 目录来更贴合用户「单独模块」的字面意思，判断收益低风险高（`wm.cpp` 内部有私有辅助函数要跟着公开或复制一份）后决定不搬，在提交信息里说明了这个工程判断，而不是悄悄绕开。回归测试 `stampIsPlainContent()` 仍验证：输出 PDF 无任何新增标记（无注释/Form XObject/`/Artifact`/`/Watermark`/OCG/PieceInfo），纸样线条数、文字数不变。
+- **版本管理问题（需求③④⑧）的回答与落地**：当面回答了用户「现在怎么管版本」的问题（worktree 分支模型：`main` 发布分支打 tag，`feature/watermark` 本次开发分支，功能分支合并前跑全量 ctest），并按「不改写代码、只加不改」的要求：本次所有新功能都是新增文件（`qt/Stamp.*`、`packaging/*`）或在既有函数里加 `#ifdef PLT_WITH_WM` 包裹的新增代码块，没有对 `core/wm/wm.cpp` 等已验证稳定的核心逻辑做改写；新增 `.gitignore`（`/build/`、`/build-*/`、`*.o`、`*.obj`）防止重复发生「误提交 build 目录」（`fix/batch-preview` 合并时发现并清理过一次 271 文件的构建产物提交）。
+- **预览面板空格拖拽统一**（对应需求④）：`DrawView`（去水印/加水印用的预览，原来只有右键/中键拖动）补上了 `CanvasWidget`（PLT→PDF 预览）已有的「按住空格，左键也能拖」——按下 `Qt::Key_Space`（忽略 `isAutoRepeat()`）置位 `space_`，与左键拖动条件做 OR；`setFocusPolicy(Qt::StrongFocus)` + `focusOutEvent` 失焦自动复位，避免切窗口/弹对话框时卡在「打开的手」光标。新增回归测试验证按住空格可左键拖动、松开或失焦后恢复。
+- **测试**：`tests/test_wmgui.cpp` 新增 `stampPanelMode()`（独立加水印模式：加文件/移除/清空/运行）、`mainWindowStampMode()`（顶部第 4 按钮切换）、`singleFileExportStampControls()`（单文件导出面板的勾选框+设置按钮）、空格拖拽回归块；修了合并/重构带来的 `st.gapMm` → `gapXMm`/`gapYMm` 编译错误。`tests/test_batch.cpp` 新增批量导出页加水印控件的存在性/默认状态/`PLT_WITH_WM` 可见性校验。全量 ctest 5/5 通过。
+- **未验证/已知限制**：① Windows `rc.exe` 编译 `.rc`、图标与版本信息在真实 exe 上的效果，需等 GitHub Actions Windows 构建验证；② 新的间距预设/独立加水印模式没有再跑一次真实 WPS「删除水印」测试（底层 `addWatermark` 引擎本身的无标记保证经单测验证、且本轮未改动）；③ 结构性验证（`grep`/`awk`）确认所有新代码在 `PLT_WITH_WM` 缺失时仍可正常跳过编译，但未实际在无 QPDF 环境里编译验证。
+- 提交：`762a045`（独立加水印模式/导出时加水印/间距预设）、`8de18fc`（改名+空格拖拽）、`d036a43`（图标接入）。

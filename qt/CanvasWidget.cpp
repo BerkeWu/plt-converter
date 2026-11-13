@@ -82,17 +82,17 @@ QRectF CanvasWidget::sceneRect() const {
 void CanvasWidget::refit() {
     const QRectF sr = sceneRect();
     const double pad = 36;
-    scale_ = std::max(0.01, std::min((width() - 2 * pad) / sr.width(), (height() - 2 * pad) / sr.height()));
-    origin_ = QPointF(width() / 2.0, height() / 2.0) - sr.center() * scale_;
+    scale_ = std::max(0.01, std::min((width() - 2 * pad) / sr.width(), (viewH() - 2 * pad) / sr.height()));
+    origin_ = QPointF(width() / 2.0, viewH() / 2.0) - sr.center() * scale_;
 }
 
 void CanvasWidget::fitWindow() { autoFit_ = true; refit(); update(); }
 
 void CanvasWidget::actualSize() {
     autoFit_ = false;
-    const QPointF c = toWorld(QPointF(width() / 2.0, height() / 2.0));
+    const QPointF c = toWorld(QPointF(width() / 2.0, viewH() / 2.0));
     scale_ = logicalDpiX() / 25.4;  // 1 mm on screen = 1 mm physical (as far as the OS dpi is right)
-    origin_ = QPointF(width() / 2.0, height() / 2.0) - c * scale_;
+    origin_ = QPointF(width() / 2.0, viewH() / 2.0) - c * scale_;
     update();
 }
 
@@ -103,8 +103,8 @@ void CanvasWidget::focusCell(int r, int c) {
     // frame of the sheet plus the strip printed outside it
     const QRectF cell(c * grid_.Wp, r * grid_.Hp, grid_.Wp + 2 * grid_.strip, grid_.Hp + 2 * grid_.strip);
     const double pad = 40;
-    scale_ = std::max(0.01, std::min((width() - 2 * pad) / cell.width(), (height() - 2 * pad) / cell.height()));
-    origin_ = QPointF(width() / 2.0, height() / 2.0) - cell.center() * scale_;
+    scale_ = std::max(0.01, std::min((width() - 2 * pad) / cell.width(), (viewH() - 2 * pad) / cell.height()));
+    origin_ = QPointF(width() / 2.0, viewH() / 2.0) - cell.center() * scale_;
     update();
 }
 
@@ -116,11 +116,22 @@ void CanvasWidget::setTip(const QString& text, bool applyBtn, bool dismissBtn) {
     layoutTip();
 }
 
+int CanvasWidget::tipReserve() const {
+    return tip_ && tip_->isVisibleTo(this) ? tip_->height() + 20 : 0;
+}
+
 void CanvasWidget::layoutTip() {
     tip_->setMaximumWidth(std::max(200, width() - 28));
     tip_->adjustSize();
-    tip_->move(14, height() - tip_->height() - 12);
+    const int before = reserve_;
+    reserve_ = tipReserve();
+    // the tip sits in its own strip below the drawing, never on top of it
+    tip_->move(14, height() - tip_->height() - 10);
     tip_->raise();
+    if (reserve_ != before) {
+        if (autoFit_) refit();
+        update();
+    }
 }
 
 void CanvasWidget::resizeEvent(QResizeEvent*) {
@@ -140,6 +151,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         return;
     }
     p.setRenderHint(QPainter::Antialiasing, view_->segments < 150000);
+    p.setClipRect(QRect(0, 0, width(), viewH()));
 
     // ---- page grid (layout mode) ----
     if (mode_ == Layout && grid_.valid) {
@@ -187,7 +199,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         p.setPen(pen);
         p.setBrush(Qt::NoBrush);
         QColor cur = base;
-        const QRectF vis = QRectF(toWorld(QPointF(0, 0)), toWorld(QPointF(width(), height()))).translated(-o);
+        const QRectF vis = QRectF(toWorld(QPointF(0, 0)), toWorld(QPointF(width(), viewH()))).translated(-o);
         const double minMm = 0.7 / scale_;
         for (int i = 0; i < view_->polys.size(); ++i) {
             const QRectF& b = view_->boxes[i];
@@ -234,7 +246,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         const double barMm = std::pow(10.0, std::floor(std::log10(120.0 / scale_)));
         const double barPx = barMm * scale_;
         p.setPen(QPen(QColor("#334444"), 2));
-        const QPointF a(width() - 20 - barPx, height() - 18), b(width() - 20, height() - 18);
+        const QPointF a(width() - 20 - barPx, viewH() - 18), b(width() - 20, viewH() - 18);
         p.drawLine(a, b);
         p.drawLine(a + QPointF(0, -4), a + QPointF(0, 4));
         p.drawLine(b + QPointF(0, -4), b + QPointF(0, 4));
@@ -256,6 +268,14 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         f.setBold(true);
         p.setFont(f);
         p.drawText(s.normalized().topLeft() + QPointF(4, -5), QStringLiteral("%1 × %2 mm").arg(sel_.width(), 0, 'f', 1).arg(sel_.height(), 0, 'f', 1));
+    }
+
+    // ---- tip strip (below the drawing area) ----
+    if (reserve_ > 0) {
+        p.setClipping(false);
+        p.fillRect(QRect(0, viewH(), width(), height() - viewH()), QColor("#DCE5E4"));
+        p.setPen(QColor("#C3CFCE"));
+        p.drawLine(0, viewH(), width(), viewH());
     }
 }
 

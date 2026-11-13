@@ -32,6 +32,7 @@ struct Params {
     double alignR = 0.145, alignG = 0.388, alignB = 0.922;  // alignment marks: blue (#2563EB) by default
     bool useOriginalColors = false;  // use the colours the PLT assigns to pens (PC); pens without a colour use lineR/G/B
     double lineR = 0, lineG = 0, lineB = 0;  // pattern line colour (helper lines / page numbers stay black)
+    std::vector<std::string> blankLabels;  // pages ("行-列") the user set to blank by hand: pattern removed, sheet still output (marks + number)
     std::string fileTag;     // batch: short file name printed next to the page number (UTF-8, empty = off)
     bool singlePage = false;  // whole drawing on ONE page (page = drawing + 2*margin); no overlap/page number/align marks
     std::string topMark = "好样纸样plt转换器";
@@ -55,6 +56,7 @@ struct Page {
     int row = -1, col = -1;
     bool overview = false;
     bool empty = false;         // contains no pattern line
+    bool manual = false;        // user set this page to blank (never skipped, even when empty pages are)
     std::vector<Path> paths;    // pattern + helper lines
     std::vector<Text> texts;
 };

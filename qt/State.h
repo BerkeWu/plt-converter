@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QRectF>
 #include <QString>
+#include <QStringList>
 
 #include "../core/layout.h"
 
@@ -13,15 +14,17 @@ struct State {
     QString paper = QStringLiteral("A4");
     bool landscape = true;
     bool autoOrient = true;   // "最省纸" orientation chosen by the engine
-    double margin = 5, overlap = 10;
+    double margin = 0, overlap = 10;   // defaults: 页边距 0 mm, 重叠区 10 mm
     double offX = 0, offY = 0;
     bool singlePage = false, pageNumbers = true, calibBox = true, alignMarks = true, overview = true, keepBlank = false;
     QColor alignColor = QColor("#2563EB");   // 拼接对位标记颜色（默认蓝色）
-    double calibCm = 5, lineWidth = 0.25;
+    double calibCm = 5, lineWidth = 0.1;   // 校准框 5 cm, 线宽 0.1 mm
+    bool fileTag = false;     // 页码旁附加文件名（单文件；批量用 BatchOptions::fileTag）
+    QStringList blanked;      // pages the user set to blank by hand (labels "行-列"); cleared when the drawing geometry changes
     QColor color = Qt::black;
     bool origColor = true;    // "原色": pen colours defined in the PLT (PC); pens without one print black
     // --- import (step 1) ---
-    bool ignoreFrame = false;
+    bool ignoreFrame = true;  // 忽略纸张边框：默认开启
     int rot = 0;              // counter-clockwise quarter turns
     bool mirror = false;
     bool hasSel = false;
@@ -33,7 +36,7 @@ struct State {
                overlap == o.overlap && offX == o.offX && offY == o.offY && singlePage == o.singlePage &&
                pageNumbers == o.pageNumbers && calibBox == o.calibBox && alignMarks == o.alignMarks &&
                overview == o.overview && keepBlank == o.keepBlank && calibCm == o.calibCm && lineWidth == o.lineWidth &&
-               color == o.color && alignColor == o.alignColor && origColor == o.origColor && ignoreFrame == o.ignoreFrame && rot == o.rot &&
+               fileTag == o.fileTag && blanked == o.blanked && color == o.color && alignColor == o.alignColor && origColor == o.origColor && ignoreFrame == o.ignoreFrame && rot == o.rot &&
                mirror == o.mirror && hasSel == o.hasSel && sel == o.sel && selClip == o.selClip;
     }
     bool operator!=(const State& o) const { return !(*this == o); }
@@ -59,6 +62,7 @@ inline layout::Params toParams(const State& s) {
     p.alignMarks = s.alignMarks;
     p.overview = s.overview;
     p.skipEmpty = !s.keepBlank;
+    for (const QString& b : s.blanked) p.blankLabels.push_back(b.toStdString());
     p.lineWidth = s.lineWidth;
     p.useOriginalColors = s.origColor;
     const QColor c = s.origColor ? QColor(Qt::black) : s.color;   // black = colour of pens without a definition
@@ -74,7 +78,8 @@ inline QJsonObject stateToJson(const State& s) {
     o["margin"] = s.margin; o["overlap"] = s.overlap; o["offX"] = s.offX; o["offY"] = s.offY;
     o["singlePage"] = s.singlePage; o["pageNumbers"] = s.pageNumbers; o["calibBox"] = s.calibBox;
     o["alignMarks"] = s.alignMarks; o["overview"] = s.overview; o["keepBlank"] = s.keepBlank;
-    o["calibCm"] = s.calibCm; o["lineWidth"] = s.lineWidth;
+    o["calibCm"] = s.calibCm; o["lineWidth"] = s.lineWidth; o["fileTag"] = s.fileTag;
+    o["blanked"] = QJsonArray::fromStringList(s.blanked);
     o["color"] = s.color.name(); o["alignColor"] = s.alignColor.name(); o["origColor"] = s.origColor;
     o["ignoreFrame"] = s.ignoreFrame; o["rot"] = s.rot; o["mirror"] = s.mirror;
     o["hasSel"] = s.hasSel; o["selClip"] = s.selClip;
@@ -99,7 +104,9 @@ inline State stateFromJson(const QJsonObject& o) {
     QColor c(str("color", s.color.name())); if (c.isValid()) s.color = c;
     QColor a(str("alignColor", s.alignColor.name())); if (a.isValid()) s.alignColor = a;
     s.origColor = boo("origColor", s.origColor);
-    s.ignoreFrame = boo("ignoreFrame", false); s.rot = ((o["rot"].toInt(0) % 4) + 4) % 4; s.mirror = boo("mirror", false);
+    s.fileTag = boo("fileTag", false);
+    for (const auto& v : o["blanked"].toArray()) if (v.isString()) s.blanked << v.toString();
+    s.ignoreFrame = boo("ignoreFrame", s.ignoreFrame); s.rot = ((o["rot"].toInt(0) % 4) + 4) % 4; s.mirror = boo("mirror", false);
     s.hasSel = boo("hasSel", false); s.selClip = boo("selClip", true);
     const QJsonArray r = o["sel"].toArray();
     if (r.size() == 4) s.sel = QRectF(r[0].toDouble(), r[1].toDouble(), r[2].toDouble(), r[3].toDouble());

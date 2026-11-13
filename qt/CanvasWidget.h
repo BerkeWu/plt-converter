@@ -1,5 +1,6 @@
 // Central canvas: draws the drawing (and in layout mode the page grid), zoom / pan / drag / box-select.
 #pragma once
+#include <algorithm>
 #include <QColor>
 #include <QFrame>
 #include <QLabel>
@@ -82,6 +83,9 @@ private:
     void zoomAt(const QPointF& screenPos, double factor);
     void refit();
     void layoutTip();
+    int tipReserve() const;
+    int viewH() const { return std::max(1, height() - reserve_); }   // drawing area; the tip strip is below it
+    int reserve_ = 0;
 
     std::shared_ptr<const DrawingView> view_;
     Mode mode_ = Import;

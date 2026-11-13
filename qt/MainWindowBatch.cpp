@@ -36,9 +36,14 @@
 #include <QtConcurrent>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <system_error>
 
 #include "BatchWidgets.h"
 #include "MainWindow.h"
+#ifdef PLT_WITH_WM
+#include "Stamp.h"
+#endif
 #include "Widgets.h"
 
 namespace {
@@ -108,7 +113,7 @@ QWidget* MainWindow::buildBatchToggleBar() {
     auto* l = new QHBoxLayout(w);
     l->setContentsMargins(12, 8, 12, 4);
     bu_.tabLayout = plainButton(tr("排版"));
-    bu_.tabShape = plainButton(tr("图形"));
+    bu_.tabShape = plainButton(tr("图形与选区"));
     bu_.tabShape->setToolTip(tr("旋转 / 镜像 / 忽略纸张边框 / 框选区域"));
     for (auto* b : {bu_.tabLayout, bu_.tabShape}) { b->setCheckable(true); b->setProperty("seg", true); l->addWidget(b); }
     auto* g = new QButtonGroup(w);
@@ -192,6 +197,8 @@ QWidget* MainWindow::buildBatchRightHost() {
     il->addWidget(card);
     bu_.overrideNote = noteLabel();
     il->addWidget(bu_.overrideNote);
+    bu_.shapeNote = noteLabel();
+    il->addWidget(bu_.shapeNote);
     bu_.infoBox = info;
     l->addWidget(info);
     // (index 1 is filled with sideHolder_ by batchChrome)
@@ -428,9 +435,23 @@ QWidget* MainWindow::buildBatchExportPanel() {
     bu_.expOpen = plainButton(tr("打开输出文件夹"));
     bu_.expCsv = plainButton(tr("导出报告（CSV）"));
     bu_.expRetry = plainButton(tr("仅重试失败项"));
+    bu_.expStamp = plainButton(tr("给导出的 PDF 添加水印"));
+    bu_.expStamp->setToolTip(tr("一键添加水印（矢量轮廓写入页面内容，WPS/Acrobat 的「删除水印」认不出）。按住 Shift 点击可重新设置水印。"));
     l->addWidget(bu_.expOpen);
     l->addWidget(bu_.expCsv);
     l->addWidget(bu_.expRetry);
+    l->addWidget(sectionLabel(tr("水印")));
+    bu_.stampOnExport = new QCheckBox(tr("导出时添加水印（每个文件导出后直接加好）"));
+    bu_.stampSettingsBtn = plainButton(tr("水印设置…"));
+    l->addWidget(hbox({bu_.stampOnExport, bu_.stampSettingsBtn}));
+    l->addWidget(bu_.expStamp);
+#ifdef PLT_WITH_WM
+    connect(bu_.stampSettingsBtn, &QPushButton::clicked, this, [this] { StampDialog dlg(items_.size(), this); dlg.exec(); });
+#else
+    bu_.expStamp->hide();
+    bu_.stampOnExport->hide();
+    bu_.stampSettingsBtn->hide();
+#endif
     l->addWidget(noteLabel(tr("PDF 为 1:1 实际尺寸，打印时请选择【实际大小 / 100%】，切勿选择【适应页面】。")));
     l->addStretch(1);
     bu_.expBack = plainButton(tr("返回逐一预览"));
@@ -466,6 +487,13 @@ QWidget* MainWindow::buildBatchExportPanel() {
         else notify(tr("导出报告"), tr("无法写入该文件。"));
     });
     connect(bu_.expRetry, &QPushButton::clicked, this, [this] { batchStartExport(true); });
+#ifdef PLT_WITH_WM
+    connect(bu_.expStamp, &QPushButton::clicked, this, [this] {
+        QStringList outs;
+        for (const auto& r : results_) if (r.err.isEmpty() && !r.cancelled && !r.outPath.isEmpty() && QFileInfo::exists(r.outPath)) outs << r.outPath;
+        runStampFlow(outs, this, QApplication::keyboardModifiers() & Qt::ShiftModifier);
+    });
+#endif
     connect(bu_.expBack, &QPushButton::clicked, this, [this] { goBatchStep(3); });
     return w;
 }
@@ -543,7 +571,9 @@ void MainWindow::notify(const QString& title, const QString& text) {
 
 layout::Params MainWindow::currentParams() const {
     if (batch_ && cur_ >= 0 && cur_ < items_.size()) return batchParams(s_, opts_, cur_, items_[cur_]->path);
-    return toParams(s_);
+    layout::Params p = toParams(s_);
+    if (s_.fileTag && !path_.isEmpty()) p.fileTag = fileTagFor(path_).toUtf8().toStdString();
+    return p;
 }
 
 EditCtx MainWindow::grabCtx() const {
@@ -606,6 +636,8 @@ void MainWindow::convertToBatch() {
     setBatchMode(true);
     State t = tmpl_;
     copyLayout(t, st);
+    opts_.fileTag = st.fileTag;
+    t.fileTag = false;
     tmpl_ = t;
     tmplBefore_ = t;
     s_ = t;
@@ -782,6 +814,22 @@ void MainWindow::setBatchTab(bool shape) {
     thumbStripBox_->setVisible(!shape);
     syncUi();
     updateTip();
+}
+
+// One line per per-file graphic edit, so it is visible from either tab what was changed on this file.
+QString MainWindow::shapeSummary(const State& s, bool frameDetected) const {
+    QStringList on;
+    if (s.ignoreFrame) on << tr("忽略纸张边框");
+    if (s.rot) on << tr("旋转 %1°").arg(s.rot * 90);
+    if (s.mirror) on << tr("水平镜像");
+    if (s.hasSel) on << tr("框选 %1 × %2 mm（%3）").arg(s.sel.width(), 0, 'f', 0).arg(s.sel.height(), 0, 'f', 0).arg(s.selClip ? tr("按边界裁剪") : tr("整条保留"));
+    QString t;
+    if (!on.isEmpty()) t = tr("✎ 本文件图形：%1。").arg(on.join(tr(" · ")));
+    if (frameDetected && !s.ignoreFrame) {
+        if (!t.isEmpty()) t += QLatin1Char('\n');
+        t += tr("检测到纸张边框，可在「图形与选区」页勾选忽略。");
+    }
+    return t;
 }
 
 // ============================================================================ table / lists
@@ -1038,6 +1086,7 @@ State MainWindow::deriveState(const BatchItem& it, const State& base) const {
     State n = base;
     n.ignoreFrame = it.state.ignoreFrame; n.rot = it.state.rot; n.mirror = it.state.mirror;
     n.hasSel = it.state.hasSel; n.sel = it.state.sel; n.selClip = it.state.selClip;
+    n.blanked = it.state.blanked;     // pages this file's user set to blank by hand
     n.offX = n.offY = 0;
     return n;
 }
@@ -1257,6 +1306,13 @@ void MainWindow::updateBatchInfo() {
     }
     const bool over = isOverridden(it, tmpl_);
     bu_.overrideNote->setText(over ? tr("✎ 本文件已覆盖通用参数。") : tr("本文件参数继承通用设置：%1 · 边距 %2 · 重叠 %3 · 页码%4。").arg(tmpl_.paper).arg(tmpl_.margin).arg(tmpl_.overlap).arg(tmpl_.pageNumbers ? tr("开启") : tr("关闭")));
+    {
+        const QString sn = shapeSummary(s_, it.frameIdx >= 0);
+        bu_.shapeNote->setText(sn);
+        bu_.shapeNote->setVisible(!sn.isEmpty());
+        const bool edited = s_.ignoreFrame || s_.rot || s_.mirror || s_.hasSel;
+        bu_.tabShape->setText(edited ? tr("图形与选区 ●") : tr("图形与选区"));
+    }
     bu_.restoreTmpl->setEnabled(over);
     bu_.restoreAuto->setEnabled(it.haveAuto && s_ != it.autoState);
     bu_.applyFollow->setEnabled(pos >= 0 && pos + 1 < order.size());
@@ -1366,6 +1422,7 @@ void MainWindow::syncOptsUi() {
     bu_.expOpen->setEnabled(!exporting_ && anyDone);
     bu_.expCsv->setEnabled(!exporting_ && (anyDone || anyFailed));
     bu_.expRetry->setEnabled(!exporting_ && anyFailed);
+    bu_.expStamp->setEnabled(!exporting_ && anyDone);
     bu_.expBack->setEnabled(!exporting_);
 }
 
@@ -1442,6 +1499,12 @@ void MainWindow::batchStartExport(bool retryOnly) {
     exportTick();
     if (exportPending_ == 0) { finishExport(); return; }
     QPointer<MainWindow> self(this);
+#ifdef PLT_WITH_WM
+    const bool doStamp = bu_.stampOnExport && bu_.stampOnExport->isChecked();
+    const StampSettings stampSettings = doStamp ? StampSettings::load() : StampSettings();
+    const wm::StampSpec stampSpec = doStamp && stampSettings.valid() ? buildStampSpec(stampSettings) : wm::StampSpec();
+    const bool stampReady = doStamp && stampSettings.valid();
+#endif
     for (int i : targets) {
         BatchItem& it = *items_[i];
         if (it.status != ItemStatus::Exporting) continue;
@@ -1458,9 +1521,27 @@ void MainWindow::batchStartExport(bool retryOnly) {
             onExportResult(r);
         });
         w->setFuture(QtConcurrent::run(&exportPool_, [=]() {
-            return exportOne(id, path, st, p, out, big, *ctl, [self, id](int pi, int pn) {
+            ExportResult r = exportOne(id, path, st, p, out, big, *ctl, [self, id](int pi, int pn) {
                 QMetaObject::invokeMethod(qApp, [self, id, pi, pn] { if (self) self->setItemProgress(id, pi, pn); }, Qt::QueuedConnection);
             });
+#ifdef PLT_WITH_WM
+            // Stamping runs in the same per-file background task as the export itself (same thread pool, same
+            // parallelism), right after a successful export: one pass, the output is already watermarked.
+            if (r.err.isEmpty() && !r.cancelled && stampReady) {
+                auto fsOf = [](const QString& s) { return wm::fromU8(s.toUtf8().toStdString()); };
+                const QString target = stampOutputPath(r.outPath, stampSettings);
+                const QString tmp = target + ".stamp-tmp";
+                const auto sr = wm::addWatermark(fsOf(r.outPath), fsOf(tmp), stampSpec);
+                std::error_code ec;
+                if (sr.ok) {
+                    std::filesystem::rename(fsOf(tmp), fsOf(target), ec);
+                    if (ec) { std::filesystem::remove(fsOf(target), ec); std::filesystem::rename(fsOf(tmp), fsOf(target), ec); }
+                }
+                if (sr.ok && !ec) r.outPath = target;
+                else std::filesystem::remove(fsOf(tmp), ec);   // best-effort: the export itself still succeeded, keep the unstamped file
+            }
+#endif
+            return r;
         }));
     }
 }

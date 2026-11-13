@@ -3,7 +3,9 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QCheckBox>
 #include <QFile>
+#include <QLabel>
 #include <QFileInfo>
 #include <QProcess>
 #include <QPushButton>
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
         if (it.state.paper != "A3") ++mism;
         // exhaustive check: both orientations, fewest effective pages wins (PRD 4.9)
         ParseResult pr = parseJob(it.path);
+        if (it.state.ignoreFrame) plt::stripFrame(*pr.doc);       // 「忽略纸张边框」 is on by default
         layout::Params p = batchParams(it.state, w.batchOptions(), i, it.path);
         p.orient = layout::Orient::Portrait;  const int pp = layout::buildPlan(*pr.doc, p).effectivePages;
         p.orient = layout::Orient::Landscape; const int pl = layout::buildPlan(*pr.doc, p).effectivePages;
@@ -148,6 +151,24 @@ int main(int argc, char** argv) {
     w.undo();
     CHECK(w.batchItems()[first]->state.overlap == 10, "per-file undo");
     w.redo();
+    {   // hand-set blank page in the per-file preview: stored with this file only
+        for (int g = 0; g < 100 && !(w.batchItems()[first]->doc && w.planValid()); ++g) pump(60);
+        waitPlan(w);
+        int pick = -1;
+        for (int i = 0; i < w.lastPlan().meta.size(); ++i) if (!w.lastPlan().meta[i].empty && !w.lastPlan().meta[i].overview) { pick = i; break; }
+        if (pick >= 0) {
+            const QString lab = w.lastPlan().meta[pick].label;
+            const int eff = w.lastPlan().effective;
+            w.blankPages({pick}, true);
+            waitPlan(w);
+            CHECK(w.batchItems()[first]->state.blanked == QStringList{lab}, "batch: hand-set blank page is stored in the file's own state");
+            CHECK(w.lastPlan().effective == eff - 1, "batch: the blank page is no longer effective");
+            CHECK(w.batchItems()[first]->state.fileTag == false && !w.batchOptions().fileTag, "batch: file name beside the page number is off by default");
+            w.blankPages({pick}, false);
+            waitPlan(w);
+            CHECK(w.batchItems()[first]->state.blanked.isEmpty(), "batch: restoring the page clears the override");
+        }
+    }
     {   // optimisation hint: a drawing that sticks out by 3 mm gets "move left 3 mm" + a dashed ghost, and the button applies it
         w.batchActivate(4);   // 190 x 90 mm
         for (int g = 0; g < 100 && !(w.batchItems()[4]->doc && w.planValid()); ++g) pump(60);
@@ -166,6 +187,51 @@ int main(int argc, char** argv) {
         w.batchActivate(0);
         for (int g = 0; g < 100 && !(w.batchItems()[0]->doc && w.planValid()); ++g) pump(60);
     }
+    {   // 「忽略纸张边框」「框选区域」 in the per-file preview (v1.0.1): same controls and effect as the single-file mode
+        int fi = -1;
+        for (int i = 0; i < w.batchItems().size(); ++i) if (w.batchItems()[i]->valid() && w.batchItems()[i]->frameIdx >= 0) { fi = i; break; }
+        if (fi >= 0) {
+            w.batchActivate(fi);
+            for (int g = 0; g < 100 && !(w.batchItems()[fi]->doc && w.planValid()); ++g) pump(60);
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text().startsWith(QObject::tr("图形")) && b->isVisibleTo(&w)) { b->click(); break; }
+            pump(300);
+            QCheckBox* cb = nullptr;
+            for (auto* c : w.findChildren<QCheckBox*>()) if (c->text().startsWith(QObject::tr("忽略纸张边框"))) cb = c;
+            CHECK(cb && cb->isVisibleTo(&w) && cb->isEnabled(), "per-file preview shows 「忽略纸张边框」");
+            QPushButton* selB = nullptr;
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text() == QObject::tr("框选区域")) selB = b;
+            CHECK(selB && selB->isVisibleTo(&w) && selB->isEnabled(), "per-file preview shows 「框选区域」");
+            auto hasNote = [&](const QString& key) {
+                for (auto* l : w.findChildren<QLabel*>()) if (l->isVisibleTo(&w) && l->text().contains(key)) return true;
+                return false;
+            };
+            // 「忽略纸张边框」 is on by default (round 18), so a freshly-loaded file with a detected
+            // frame already shows the "ignored" note, not the "detected, not yet ignored" one.
+            CHECK(w.state().ignoreFrame && hasNote(QObject::tr("忽略纸张边框")) && !hasNote(QObject::tr("检测到纸张边框")),
+                  "ignore-frame on by default: the file card already summarises it as ignored");
+            if (cb) cb->click();  // uncheck: fall back to showing the raw frame
+            pump(500);
+            CHECK(!w.state().ignoreFrame && !w.batchItems()[fi]->state.ignoreFrame, "un-ignoring the frame is stored on this file only");
+            CHECK(hasNote(QObject::tr("检测到纸张边框")) && !hasNote(QObject::tr("忽略纸张边框")), "the file card summarises the edit");
+            bool othersKeep = true;
+            for (int i = 0; i < w.batchItems().size(); ++i) if (i != fi && !w.batchItems()[i]->state.ignoreFrame) othersKeep = false;
+            CHECK(othersKeep, "other files keep the default (frame ignored)");
+            // selection: clip to the left half of the drawing
+            const int full = w.pageCount();
+            w.edit([](State& s) { s.hasSel = true; s.sel = QRectF(0, 0, 150, 400); s.offX = s.offY = 0; });
+            waitPlan(w);
+            pump(300);
+            CHECK(w.batchItems()[fi]->state.hasSel, "selection is stored on this file");
+            CHECK(w.pageCount() > 0 && w.pageCount() < full, "selection shrinks the page count in the preview");
+            CHECK(hasNote(QObject::tr("框选")), "selection appears in the file summary");
+            w.undo(); w.undo();
+            waitPlan(w);
+            CHECK(!w.state().hasSel && w.state().ignoreFrame, "…both are undoable per file (back to the default: frame ignored)");
+            for (auto* b : w.findChildren<QPushButton*>()) if (b->text().startsWith(QObject::tr("排版")) && b->isVisibleTo(&w)) { b->click(); break; }
+            w.batchActivate(0);
+            for (int g = 0; g < 100 && !(w.batchItems()[0]->doc && w.planValid()); ++g) pump(60);
+        } else CHECK(false, "test data has a file with a paper frame");
+    }
     w.batchConfirmAll();
     int confirmed = 0;
     for (auto& it : w.batchItems()) if (it->valid() && it->confirmed) ++confirmed;
@@ -176,6 +242,18 @@ int main(int argc, char** argv) {
     // ---------- export: isolation, naming, pause, cancel, retry ----------
     w.batchEditTemplate([](State&) {});   // no-op, stays on step 2 -> go back to export
     w.goBatchStep(4);
+    {   // 「导出时添加水印」+「水印设置…」 sit next to the existing post-export stamp button, off by default
+        QCheckBox* stampOnExport = nullptr; QPushButton* stampSettings = nullptr;
+        for (auto* c : w.findChildren<QCheckBox*>()) if (c->text().startsWith(QObject::tr("导出时添加水印"))) stampOnExport = c;
+        for (auto* b : w.findChildren<QPushButton*>()) if (b->text() == QObject::tr("水印设置…")) stampSettings = b;
+        CHECK(stampOnExport && stampSettings, "export page has 「导出时添加水印」+「水印设置…」");
+        CHECK(!stampOnExport->isChecked(), "off by default: a plain batch export is unchanged unless opted in");
+#ifdef PLT_WITH_WM
+        CHECK(stampOnExport->isVisibleTo(&w) && stampSettings->isVisibleTo(&w), "visible when built with QPDF");
+#else
+        CHECK(!stampOnExport->isVisibleTo(&w) && !stampSettings->isVisibleTo(&w), "hidden without QPDF (no watermark module)");
+#endif
+    }
     const QString out = root + "/out";
     w.batchOptions().outDir = out;
     w.batchOptions().concurrency = 2;
