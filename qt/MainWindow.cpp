@@ -63,7 +63,6 @@ const char* kPresetNames[5] = {"黑色", "红色", "蓝色", "绿色", "紫色"}
 const QColor kAlignPresets[5] = {QColor("#2563EB"), QColor("#111111"), QColor("#D33333"), QColor("#16A34A"), QColor("#7C3AED")};
 const char* kAlignNames[5] = {"蓝色（默认）", "黑色", "红色", "绿色", "紫色"};
 const QStringList kPapers = {"A0", "A3", "A4"};
-const double kMargins[4] = {0, 3, 5, 10};
 
 QString humanSize(qint64 b) {
     if (b < 1024) return QStringLiteral("%1 B").arg(b);
@@ -472,28 +471,6 @@ QWidget* MainWindow::buildLayoutPanel() {
     connect(orientGrp_, &QButtonGroup::idClicked, this, [this](int id) { edit([id](State& s) { s.landscape = id == 1; s.autoOrient = false; }); });
     connect(autoOrient_, &QCheckBox::toggled, this, [this](bool on) { edit([on](State& s) { s.autoOrient = on; }); });
 
-    overlapSlider_ = new NoWheelSlider(Qt::Horizontal);
-    overlapSlider_->setRange(0, 30);
-    overlapSpin_ = clickSpin(0, 30, 1, 0, " mm");
-    auto* ovRow = new QWidget;
-    auto* ovl = new QVBoxLayout(ovRow);
-    ovl->setContentsMargins(0, 0, 0, 0);
-    ovl->setSpacing(4);
-    ovl->addWidget(rowOf(sectionLabel(tr("重叠区（框外延伸）")), overlapSpin_));
-    ovl->addWidget(overlapSlider_);
-    l->addWidget(ovRow);
-    l->addWidget(noteLabel(tr("蓝色虚线框是拼接框，框外仍印出纸样线条。相邻两页把虚线框叠合，框外那圈线条就与邻页刚好重合；每个框角只有一个「+」定位点。")));
-    connect(overlapSlider_, &QSlider::valueChanged, this, [this](int v) { edit([v](State& s) { s.overlap = v; }, "overlap"); });
-    connect(overlapSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.overlap = v; }, "overlap"); });
-
-    l->addWidget(sectionLabel(tr("页边距")));
-    QWidget* mseg = makeSegmented({"0", "3", "5", "10"}, marginGrp_);
-    marginSpin_ = clickSpin(0, 50, 1, 0, " mm");
-    l->addWidget(rowOf(mseg, marginSpin_));
-    l->addWidget(noteLabel(tr("0 mm 边距不代表物理零边距：部分打印机会强制留白，请用校准框校准。")));
-    connect(marginGrp_, &QButtonGroup::idClicked, this, [this](int id) { edit([id](State& s) { s.margin = kMargins[id]; }); });
-    connect(marginSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.margin = v; }, "margin"); });
-
     auto addSwitch = [&](const QString& text, ToggleSwitch*& sw, std::function<void(State&, bool)> setter) {
         sw = new ToggleSwitch;
         sw->setAccessibleName(text);
@@ -573,10 +550,24 @@ QWidget* MainWindow::buildLayoutPanel() {
     calibSpin_ = clickSpin(1, 20, 0.5, 1, " cm");
     l->addWidget(rowOf(noteLabel(tr("校准框边长（默认 5 cm）")), calibSpin_));
     connect(calibSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.calibCm = v; }, "calib"); });
-    addSwitch(tr("添加拼接效果图（PDF 第 1 页）"), overviewSw_, [](State& s, bool v) { s.overview = v; });
+    addSwitch(tr("添加拼接效果图（PDF 最后一页）"), overviewSw_, [](State& s, bool v) { s.overview = v; });
     addSwitch(tr("输出空白页"), blankSw_, [](State& s, bool v) { s.keepBlank = v; });
 
-    l->addWidget(sectionLabel(tr("图形位置（mm）")));
+    marginSlider_ = new NoWheelSlider(Qt::Horizontal);
+    marginSlider_->setRange(0, 30);
+    marginSpin_ = clickSpin(0, 30, 1, 0, " mm");
+    auto* mrRow = new QWidget;
+    auto* mrl = new QVBoxLayout(mrRow);
+    mrl->setContentsMargins(0, 0, 0, 0);
+    mrl->setSpacing(4);
+    mrl->addWidget(sectionLabel(tr("图形位置（mm）")));
+    mrl->addWidget(rowOf(sectionLabel(tr("页边距（拼接框离纸边距离）")), marginSpin_));
+    mrl->addWidget(marginSlider_);
+    l->addWidget(mrRow);
+    l->addWidget(noteLabel(tr("蓝色虚线框就是页边距线，框外、到纸张边缘之间都印纸样内容。相邻两页把虚线框叠合，框外内容就与邻页刚好重合；每个框角只有一个「+」定位点。0 mm 不代表物理零边距：部分打印机会强制留白，请用校准框校准。")));
+    connect(marginSlider_, &QSlider::valueChanged, this, [this](int v) { edit([v](State& s) { s.margin = v; }, "margin"); });
+    connect(marginSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.margin = v; }, "margin"); });
+
     xSpin_ = spin(0, 100000, 1, 1, "");
     ySpin_ = spin(0, 100000, 1, 1, "");
     xSpin_->setPrefix("X ");
@@ -772,6 +763,10 @@ QWidget* MainWindow::buildCanvasPage() {
     connect(canvas_, &CanvasWidget::nudged, this, [this](double dx, double dy) {
         edit([dx, dy](State& s) { s.offX = std::max(0.0, s.offX + dx); s.offY = std::max(0.0, s.offY + dy); }, "nudge");
     });
+    connect(canvas_, &CanvasWidget::cellClicked, this, [this](int row, int col) {
+        for (int i = 0; i < meta_.size(); ++i)
+            if (meta_[i].row == row && meta_[i].col == col) { setPagesBlank({i}, !meta_[i].manual); break; }
+    });
     connect(canvas_, &CanvasWidget::selectionEdited, this, [this](bool has, QRectF uv, bool) {
         edit([has, uv](State& s) { s.hasSel = has; s.sel = uv; s.offX = s.offY = 0; });
     });
@@ -792,7 +787,7 @@ QWidget* MainWindow::buildPreviewPage() {
     head->setProperty("lb", true);
     head->setWordWrap(true);
     blankBtn_ = plainButton(tr("设为空白页"));
-    blankBtn_->setToolTip(tr("把选中的页设为空白页：纸样线条不再印出，页码和对位标记保留。也可在缩略图上点右键。"));
+    blankBtn_->setToolTip(tr("把选中的页设为空白页：纸样线条不再印出，页码和对位标记保留。也可在缩略图上点右键，或在排版窗口里直接点击该页。"));
     unblankBtn_ = plainButton(tr("恢复内容"));
     unblankBtn_->setToolTip(tr("取消所选页的「空白页」设置，恢复该页原有的纸样内容。"));
     auto* hrow = new QWidget;
@@ -981,7 +976,12 @@ void MainWindow::updateGridLocal() {
         g.allPresent = true;
         if (havePlan_ && last_.nx == nx && last_.ny == ny && !s_.singlePage) {
             g.allPresent = false;
-            for (const auto& m : meta_) if (m.row >= 0) g.present.insert(m.row * 10000 + m.col);
+            for (const auto& m : meta_) if (m.row >= 0) {
+                const int key = m.row * 10000 + m.col;
+                g.present.insert(key);
+                if (m.empty) g.blank.insert(key);
+                if (m.manual) g.manual.insert(key);
+            }
         }
     }
     canvas_->setGrid(g);
@@ -1047,17 +1047,10 @@ void MainWindow::syncUi() {
         orientNote_->setText(tr("竖向 %1 页 / 横向 %2 页").arg(last_.oc.portraitPages).arg(last_.oc.landscapePages));
     else
         orientNote_->clear();
-    { QSignalBlocker b(overlapSlider_); overlapSlider_->setValue(int(s_.overlap + 0.5)); }
-    setSpin(overlapSpin_, s_.overlap);
-    overlapSpin_->setEnabled(!single);
-    overlapSlider_->setEnabled(!single);
+    { QSignalBlocker b(marginSlider_); marginSlider_->setValue(int(s_.margin + 0.5)); }
     setSpin(marginSpin_, s_.margin);
-    {
-        int mid = -1;
-        for (int i = 0; i < 4; ++i) if (s_.margin == kMargins[i]) mid = i;
-        if (mid >= 0) marginGrp_->button(mid)->setChecked(true);
-        else if (auto* c = marginGrp_->checkedButton()) { marginGrp_->setExclusive(false); c->setChecked(false); marginGrp_->setExclusive(true); }
-    }
+    marginSpin_->setEnabled(!single);
+    marginSlider_->setEnabled(!single);
     setSw(singleSw_, s_.singlePage);
     setSw(pageNoSw_, s_.pageNumbers); pageNoSw_->setEnabled(!single);
     setSw(alignSw_, s_.alignMarks); alignSw_->setEnabled(!single);
@@ -1101,7 +1094,7 @@ void MainWindow::updateInfoLabels() {
     fileInfo_->setTextFormat(Qt::RichText);
     if (batch_) { cvHint_->clear(); return; }   // the batch column is narrow: no room for the hint
     cvHint_->setText(step_ == 0 ? tr("滚轮缩放 · 右键平移")
-                                : tr("拖拽移动图形 · 方向键微调"));
+                                : tr("拖拽移动图形 · 方向键微调 · 点击纸样格可删除/恢复"));
 }
 
 // ---------------------------------------------------------------- planning
@@ -1571,9 +1564,10 @@ void MainWindow::loadSettings() {
     n.paper = q.value("paper", n.paper).toString();
     if (!kPapers.contains(n.paper)) n.paper = "A4";
     // v3: 页边距 0 / 重叠区 10 / 线宽 0.1 / 校准框 5 cm became the defaults; values saved by older versions are not carried over
+    // v4: 页边距与重叠区合并为一个参数（默认 10 mm）；v3 及更早保存的页边距/重叠区同样不沿用
     const bool v3 = q.value("settingsVersion", 1).toInt() >= 3;
-    if (v3) n.margin = q.value("margin", n.margin).toDouble();
-    if (v3) n.overlap = std::clamp(q.value("overlap", n.overlap).toDouble(), 0.0, 30.0);
+    const bool v4 = q.value("settingsVersion", 1).toInt() >= 4;
+    if (v4) n.margin = std::clamp(q.value("margin", n.margin).toDouble(), 0.0, 30.0);
     n.pageNumbers = q.value("pageNumbers", n.pageNumbers).toBool();
     n.calibBox = q.value("calibBox", n.calibBox).toBool();
     n.alignMarks = q.value("alignMarks", n.alignMarks).toBool();
@@ -1592,11 +1586,10 @@ void MainWindow::loadSettings() {
 void MainWindow::saveSettings() {
     if (batch_ && bstep_ != 1) return;  // per-file parameters are not the user's defaults
     QSettings q("HaoyangPattern", "PltConverter");
-    q.setValue("settingsVersion", 3);
+    q.setValue("settingsVersion", 4);
     q.setValue("paper", s_.paper);
     q.setValue("alignColor", s_.alignColor.name());
     q.setValue("margin", s_.margin);
-    q.setValue("overlap", s_.overlap);
     q.setValue("pageNumbers", s_.pageNumbers);
     q.setValue("calibBox", s_.calibBox);
     q.setValue("alignMarks", s_.alignMarks);

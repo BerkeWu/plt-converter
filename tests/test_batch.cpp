@@ -144,12 +144,12 @@ int main(int argc, char** argv) {
     w.goBatchStep(3);
     pump(800);
     const int first = 0;
-    w.edit([](State& s) { s.overlap = 15; });
+    w.edit([](State& s) { s.margin = 15; });
     pump(400);
-    CHECK(w.batchItems()[first]->state.overlap == 15, "editing the current file stores an override");
+    CHECK(w.batchItems()[first]->state.margin == 15, "editing the current file stores an override");
     pump(300);
     w.undo();
-    CHECK(w.batchItems()[first]->state.overlap == 10, "per-file undo");
+    CHECK(w.batchItems()[first]->state.margin == 5, "per-file undo");
     w.redo();
     {   // hand-set blank page in the per-file preview: stored with this file only
         for (int g = 0; g < 100 && !(w.batchItems()[first]->doc && w.planValid()); ++g) pump(60);
@@ -169,10 +169,12 @@ int main(int argc, char** argv) {
             CHECK(w.batchItems()[first]->state.blanked.isEmpty(), "batch: restoring the page clears the override");
         }
     }
-    {   // optimisation hint: a drawing that sticks out by 3 mm gets "move left 3 mm" + a dashed ghost, and the button applies it
+    {   // optimisation hint: a drawing that sticks out gets "move left N mm" + a dashed ghost, and the button applies it
+        // (frame + both overlap strips now always span the full sheet width, so fitting on one sheet only depends on
+        // offX + drawing width vs. the sheet's printable width, 297 mm on landscape A4 regardless of margin)
         w.batchActivate(4);   // 190 x 90 mm
         for (int g = 0; g < 100 && !(w.batchItems()[4]->doc && w.planValid()); ++g) pump(60);
-        w.edit([](State& s) { s.paper = "A4"; s.autoOrient = false; s.landscape = true; s.offX = 100; s.offY = 0; });
+        w.edit([](State& s) { s.paper = "A4"; s.autoOrient = false; s.landscape = true; s.offX = 110; s.offY = 0; });
         waitPlan(w);
         pump(300);
         CHECK(w.lastPlan().hint.found && w.lastPlan().hint.dx < 0, "per-file preview: a shift hint is offered when a small move saves a page");
@@ -180,10 +182,10 @@ int main(int argc, char** argv) {
         w.grab().save(QDir::temp().filePath("batch_hint.png"));
         for (auto* b : w.findChildren<QPushButton*>()) if (b->text() == QObject::tr("应用优化位置") && b->isVisibleTo(&w)) { b->click(); break; }
         waitPlan(w);
-        CHECK(w.state().offX < 100 && w.pageCount() < pagesBefore, "「应用优化位置」 moves the drawing and saves a page");
+        CHECK(w.state().offX < 110 && w.pageCount() < pagesBefore, "「应用优化位置」 moves the drawing and saves a page");
         w.undo();
         waitPlan(w);
-        CHECK(w.state().offX == 100, "…and it is undoable");
+        CHECK(w.state().offX == 110, "…and it is undoable");
         w.batchActivate(0);
         for (int g = 0; g < 100 && !(w.batchItems()[0]->doc && w.planValid()); ++g) pump(60);
     }
@@ -313,7 +315,7 @@ int main(int argc, char** argv) {
     // ---------- session round trip (crash recovery file, PRD 4.6) ----------
     {
         QVector<std::shared_ptr<BatchItem>> its;
-        auto a = std::make_shared<BatchItem>(); a->path = valid[3]; a->state.paper = "A0"; a->state.overlap = 17; a->state.offX = 12.5; a->state.hasSel = true; a->state.sel = QRectF(1, 2, 30, 40);
+        auto a = std::make_shared<BatchItem>(); a->path = valid[3]; a->state.paper = "A0"; a->state.margin = 17; a->state.offX = 12.5; a->state.hasSel = true; a->state.sel = QRectF(1, 2, 30, 40);
         a->autoState = a->state; a->haveAuto = true; a->confirmed = true; a->adjusted = true; a->pages = 5; a->autoPages = 6;
         its.push_back(a);
         State t; t.paper = "A3"; t.alignColor = QColor("#D33333");

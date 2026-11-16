@@ -32,6 +32,10 @@ public:
         bool singlePage = false;
         QSet<int> present;          // r * 10000 + c of pages that will be output
         bool allPresent = true;
+        QSet<int> blank;            // present cells with no pattern content right now (auto-empty or manually blanked)
+        QSet<int> manual;           // subset of `blank` the user set by hand (clickable to restore); a content cell
+                                     // (present, not in `blank`) is clickable to blank; an auto-empty cell not in
+                                     // `manual` is neither (nothing to toggle there)
     };
 
     explicit CanvasWidget(QWidget* parent = nullptr);
@@ -50,6 +54,7 @@ public:
     void setLineStyle(bool useOriginal, const QColor& color, double widthMm) { useOrig_ = useOriginal; lineColor_ = color; lineMm_ = widthMm; update(); }
     void setEmptyHint(const QString& s) { emptyHint_ = s; update(); }
     void setGhost(bool on, const QPointF& offsetMm = {}) { ghostOn_ = on; ghost_ = offsetMm; update(); }   // dashed outline = suggested position
+    QPoint testCellCenter(int row, int col) const;   // tests: screen-space centre of a layout-mode grid cell, for simulated clicks
 
 public slots:
     void fitWindow();
@@ -58,6 +63,7 @@ public slots:
 signals:
     void dragBegan();
     void offsetEdited(QPointF mm, bool final);
+    void cellClicked(int row, int col);   // layout mode: plain click (no real drag) on a blankable/restorable grid cell
     void nudged(double dx, double dy);
     void selectionEdited(bool has, QRectF uv, bool final);
     void cursorMm(QPointF uv, bool inside);
@@ -78,6 +84,8 @@ protected:
 private:
     QRectF sceneRect() const;
     QRectF gridRect() const;
+    int cellAt(const QPointF& worldMm) const;                            // -1, or r*10000+c
+    int clickableCellAt(const QPointF& worldMm, bool& blankIt) const;    // -1 if nothing to toggle there
     QPointF toWorld(const QPointF& screen) const { return (screen - origin_) / scale_; }
     QPointF toScreen(const QPointF& world) const { return world * scale_ + origin_; }
     void zoomAt(const QPointF& screenPos, double factor);

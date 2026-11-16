@@ -359,14 +359,14 @@ private:
     QLabel* frameNote_ = nullptr;
     QRadioButton *clipRadio_ = nullptr, *wholeRadio_ = nullptr;
     // layout panel
-    QButtonGroup *paperGrp_ = nullptr, *orientGrp_ = nullptr, *marginGrp_ = nullptr;
+    QButtonGroup *paperGrp_ = nullptr, *orientGrp_ = nullptr;
     QWidget *paperSeg_ = nullptr, *orientSeg_ = nullptr;
     QLabel *paperNote_ = nullptr, *orientNote_ = nullptr;
     QCheckBox* autoOrient_ = nullptr;
-    QSlider* overlapSlider_ = nullptr;
+    QSlider* marginSlider_ = nullptr;
     ToggleSwitch* fileTagSw_ = nullptr;
     QWidget* fileTagRow_ = nullptr;
-    QDoubleSpinBox *overlapSpin_ = nullptr, *marginSpin_ = nullptr, *lineWidthSpin_ = nullptr, *calibSpin_ = nullptr, *xSpin_ = nullptr, *ySpin_ = nullptr;
+    QDoubleSpinBox *marginSpin_ = nullptr, *lineWidthSpin_ = nullptr, *calibSpin_ = nullptr, *xSpin_ = nullptr, *ySpin_ = nullptr;
     ToggleSwitch *singleSw_ = nullptr, *pageNoSw_ = nullptr, *calibSw_ = nullptr, *overviewSw_ = nullptr, *alignSw_ = nullptr, *blankSw_ = nullptr;
     QLabel* colorNote_ = nullptr;
     QList<Swatch*> swatches_;  // 0 = 原色, 1..5 preset, 6 = custom

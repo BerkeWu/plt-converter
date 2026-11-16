@@ -40,6 +40,22 @@ static bool load(MainWindow& w, const QString& f) {
     loop.exec();
     return ok;
 }
+// Some paths make MainWindow pop a modal QMessageBox::warning (e.g. an unparsable file). Under
+// QT_QPA_PLATFORM=offscreen nothing can click it, so load() would hang forever inside QDialog::exec().
+// Keep sweeping for one and dismissing it for as long as the load() call runs, rather than a single
+// timed guess at when it will appear (the async parse's timing isn't guaranteed, so a one-shot can fire
+// before the dialog exists and then never get another chance).
+static bool loadDismissingDialogs(MainWindow& w, const QString& f) {
+    QTimer sweep;
+    QObject::connect(&sweep, &QTimer::timeout, [] {
+        for (auto* wd : QApplication::topLevelWidgets())
+            if (auto* mb = qobject_cast<QMessageBox*>(wd)) mb->accept();
+    });
+    sweep.start(30);
+    bool ok = load(w, f);
+    sweep.stop();
+    return ok;
+}
 static QString pdfInfo(const QString& pdf, const QString& key) {
     QProcess p; p.start("pdfinfo", {pdf}); p.waitForFinished();
     for (auto& l : QString::fromUtf8(p.readAllStandardOutput()).split('\n')) if (l.startsWith(key)) return l.mid(key.size() + 1).trimmed();
@@ -62,11 +78,9 @@ int main(int argc, char** argv) {
 
     // --- bad inputs never crash ---
     { QString bad = QDir(tmp.path()).filePath("empty.plt"); QFile f(bad); f.open(QIODevice::WriteOnly); f.close();
-      QTimer::singleShot(300, [] { for (auto* wd : QApplication::topLevelWidgets()) if (auto* mb = qobject_cast<QMessageBox*>(wd)) mb->accept(); });
-      CHECK(!load(w, bad), "empty file rejected with a message, no crash"); }
+      CHECK(!loadDismissingDialogs(w, bad), "empty file rejected with a message, no crash"); }
     { QString bad = QDir(tmp.path()).filePath("junk.plt"); QFile f(bad); f.open(QIODevice::WriteOnly); f.write("hello world, not hpgl"); f.close();
-      QTimer::singleShot(300, [] { for (auto* wd : QApplication::topLevelWidgets()) if (auto* mb = qobject_cast<QMessageBox*>(wd)) mb->accept(); });
-      CHECK(!load(w, bad), "non-HPGL content rejected"); }
+      CHECK(!loadDismissingDialogs(w, bad), "non-HPGL content rejected"); }
 
     // --- import a Chinese-named file via a path with CJK + space ---
     const QString src = QDir(data).filePath("2401_儿童风衣外套-110cm.plt");
@@ -172,7 +186,7 @@ int main(int argc, char** argv) {
     // --- overview + line colour + page range filter ---
     w.edit([](State& s) { s.overview = true; s.origColor = false; s.color = QColor("#D33333"); });
     waitPlan(w);
-    CHECK(w.lastPlan().meta.first().overview, "overview page is first");
+    CHECK(w.lastPlan().meta.last().overview, "overview page is last");
     {   // the canvas shows the line colour that will be printed (was always teal)
         pump(300);
         const QImage img = canvas->grab().toImage();
@@ -212,6 +226,36 @@ int main(int argc, char** argv) {
         w.goStep(2);
         QString out = QDir(tmp.path()).filePath("blank.pdf");
         CHECK(w.exportBlocking(out).isEmpty() && pdfInfo(out, "Pages").toInt() == grid, "all cells (incl. blank) are exported by default");
+
+        // --- clicking a page tile on the layout canvas blanks/restores it (point 3 of the margin-merge round) ---
+        w.goStep(1);
+        waitPlan(w);
+        int contentIdx = -1, autoBlankIdx = -1;
+        for (int i = 0; i < w.lastPlan().meta.size(); ++i) {
+            const auto& m = w.lastPlan().meta[i];
+            if (m.overview || m.row < 0) continue;
+            if (!m.empty && contentIdx < 0) contentIdx = i;
+            if (m.empty && !m.manual && autoBlankIdx < 0) autoBlankIdx = i;
+        }
+        CHECK(contentIdx >= 0 && autoBlankIdx >= 0, "canvas click test: found both a content cell and an auto-blank cell");
+        const auto cm = w.lastPlan().meta[contentIdx];
+        const QPoint cp = canvas->testCellCenter(cm.row, cm.col);
+        QTest::mousePress(canvas, Qt::LeftButton, {}, cp);
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, cp);
+        waitPlan(w);
+        CHECK(w.state().blanked.contains(cm.label), "clicking a content tile on the layout canvas blanks it");
+        QTest::mousePress(canvas, Qt::LeftButton, {}, cp);
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, cp);
+        waitPlan(w);
+        CHECK(!w.state().blanked.contains(cm.label), "clicking the now-blank tile again restores it");
+        const auto am = w.lastPlan().meta[autoBlankIdx];
+        const QStringList before = w.state().blanked;
+        const QPoint ap = canvas->testCellCenter(am.row, am.col);
+        QTest::mousePress(canvas, Qt::LeftButton, {}, ap);
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, ap);
+        waitPlan(w);
+        CHECK(w.state().blanked == before, "clicking an auto-blank tile (nothing to toggle) does nothing");
+        w.goStep(2);
     }
     // --- frame detection on a DZ file ---
     const QString dz = QDir(data).filePath("DZ231101儿童中式背心__100码_纸宽门幅110cm_.plt");
@@ -231,15 +275,15 @@ int main(int argc, char** argv) {
     // --- parameter defaults + click-to-edit boxes ---
     {
         State def;
-        CHECK(def.overlap == 10 && def.margin == 0 && def.lineWidth == 0.1 && def.calibCm == 5, "defaults: 重叠区 10 mm, 页边距 0 mm, 线宽 0.1 mm, 校准框 5 cm");
+        CHECK(def.margin == 10 && def.lineWidth == 0.1 && def.calibCm == 5, "defaults: 页边距 10 mm, 线宽 0.1 mm, 校准框 5 cm");
         CHECK(def.ignoreFrame && !def.fileTag, "defaults: 忽略纸张边框 on, 页码旁附加文件名 off");
         MainWindow w2;
         w2.show();
         pump(50);
-        CHECK(w2.state().margin == 0 && w2.state().ignoreFrame && !w2.state().fileTag, "new window starts with the new defaults");
+        CHECK(w2.state().margin == 10 && w2.state().ignoreFrame && !w2.state().fileTag, "new window starts with the new defaults");
         QList<ClickSpinBox*> spins;     // (no Q_OBJECT in the header-only widget: qobject_cast would match every QDoubleSpinBox)
         for (auto* d : w2.findChildren<QDoubleSpinBox*>()) if (auto* c = dynamic_cast<ClickSpinBox*>(d)) spins << c;
-        CHECK(spins.size() == 4, "overlap / margin / line width / calibration boxes are click-to-edit");
+        CHECK(spins.size() == 3, "margin / line width / calibration boxes are click-to-edit");
         for (auto* sp : spins) {
             CHECK(sp->locked(), "box starts locked");
             const double before = sp->value();

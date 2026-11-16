@@ -81,13 +81,13 @@ QWidget* hbox(std::initializer_list<QWidget*> ws, int spacing = 6) {
 
 // The layout parameters a template carries (everything the user can set per file except position / import-stage edits).
 bool layoutEqual(const State& a, const State& b) {
-    return a.paper == b.paper && a.margin == b.margin && a.overlap == b.overlap && a.singlePage == b.singlePage &&
+    return a.paper == b.paper && a.margin == b.margin && a.singlePage == b.singlePage &&
            a.pageNumbers == b.pageNumbers && a.calibBox == b.calibBox && a.alignMarks == b.alignMarks && a.overview == b.overview &&
            a.keepBlank == b.keepBlank && a.calibCm == b.calibCm && a.lineWidth == b.lineWidth && a.origColor == b.origColor &&
            a.color == b.color && a.alignColor == b.alignColor && a.autoOrient == b.autoOrient;
 }
 void copyLayout(State& dst, const State& src) {
-    dst.paper = src.paper; dst.margin = src.margin; dst.overlap = src.overlap; dst.singlePage = src.singlePage;
+    dst.paper = src.paper; dst.margin = src.margin; dst.singlePage = src.singlePage;
     dst.pageNumbers = src.pageNumbers; dst.calibBox = src.calibBox; dst.alignMarks = src.alignMarks; dst.overview = src.overview;
     dst.keepBlank = src.keepBlank; dst.calibCm = src.calibCm; dst.lineWidth = src.lineWidth; dst.origColor = src.origColor;
     dst.color = src.color; dst.alignColor = src.alignColor; dst.autoOrient = src.autoOrient; dst.landscape = src.landscape;
@@ -1305,7 +1305,7 @@ void MainWindow::updateBatchInfo() {
         canvas_->setGhost(false);
     }
     const bool over = isOverridden(it, tmpl_);
-    bu_.overrideNote->setText(over ? tr("✎ 本文件已覆盖通用参数。") : tr("本文件参数继承通用设置：%1 · 边距 %2 · 重叠 %3 · 页码%4。").arg(tmpl_.paper).arg(tmpl_.margin).arg(tmpl_.overlap).arg(tmpl_.pageNumbers ? tr("开启") : tr("关闭")));
+    bu_.overrideNote->setText(over ? tr("✎ 本文件已覆盖通用参数。") : tr("本文件参数继承通用设置：%1 · 页边距 %2 · 页码%3。").arg(tmpl_.paper).arg(tmpl_.margin).arg(tmpl_.pageNumbers ? tr("开启") : tr("关闭")));
     {
         const QString sn = shapeSummary(s_, it.frameIdx >= 0);
         bu_.shapeNote->setText(sn);
@@ -1387,7 +1387,7 @@ void MainWindow::applyToFollowing() {
     for (int k = pos + 1; k < order.size(); ++k) {
         BatchItem& it = *items_[order[k]];
         if (!it.valid()) continue;
-        it.state.paper = src.paper; it.state.margin = src.margin; it.state.overlap = src.overlap;
+        it.state.paper = src.paper; it.state.margin = src.margin;
         it.state.autoOrient = src.autoOrient;
         if (!src.autoOrient) it.state.landscape = src.landscape;
         it.state.offX = it.state.offY = 0;      // position is never copied (PRD 4.4)

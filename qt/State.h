@@ -14,7 +14,7 @@ struct State {
     QString paper = QStringLiteral("A4");
     bool landscape = true;
     bool autoOrient = true;   // "最省纸" orientation chosen by the engine
-    double margin = 0, overlap = 10;   // defaults: 页边距 0 mm, 重叠区 10 mm
+    double margin = 10;       // mm: sheet edge -> 拼接框/页边距线 = the whole strip outside the frame carries overlap pattern
     double offX = 0, offY = 0;
     bool singlePage = false, pageNumbers = true, calibBox = true, alignMarks = true, overview = true, keepBlank = false;
     QColor alignColor = QColor("#2563EB");   // 拼接对位标记颜色（默认蓝色）
@@ -33,7 +33,7 @@ struct State {
 
     bool operator==(const State& o) const {
         return paper == o.paper && landscape == o.landscape && autoOrient == o.autoOrient && margin == o.margin &&
-               overlap == o.overlap && offX == o.offX && offY == o.offY && singlePage == o.singlePage &&
+               offX == o.offX && offY == o.offY && singlePage == o.singlePage &&
                pageNumbers == o.pageNumbers && calibBox == o.calibBox && alignMarks == o.alignMarks &&
                overview == o.overview && keepBlank == o.keepBlank && calibCm == o.calibCm && lineWidth == o.lineWidth &&
                fileTag == o.fileTag && blanked == o.blanked && color == o.color && alignColor == o.alignColor && origColor == o.origColor && ignoreFrame == o.ignoreFrame && rot == o.rot &&
@@ -52,7 +52,6 @@ inline layout::Params toParams(const State& s) {
     p.paper = layout::paperByName(s.paper.toStdString());
     p.orient = s.landscape ? layout::Orient::Landscape : layout::Orient::Portrait;
     p.margin = s.margin;
-    p.overlap = s.overlap;
     p.offX = s.offX;
     p.offY = s.offY;
     p.singlePage = s.singlePage;
@@ -75,7 +74,7 @@ inline layout::Params toParams(const State& s) {
 inline QJsonObject stateToJson(const State& s) {
     QJsonObject o;
     o["paper"] = s.paper; o["landscape"] = s.landscape; o["autoOrient"] = s.autoOrient;
-    o["margin"] = s.margin; o["overlap"] = s.overlap; o["offX"] = s.offX; o["offY"] = s.offY;
+    o["margin"] = s.margin; o["offX"] = s.offX; o["offY"] = s.offY;
     o["singlePage"] = s.singlePage; o["pageNumbers"] = s.pageNumbers; o["calibBox"] = s.calibBox;
     o["alignMarks"] = s.alignMarks; o["overview"] = s.overview; o["keepBlank"] = s.keepBlank;
     o["calibCm"] = s.calibCm; o["lineWidth"] = s.lineWidth; o["fileTag"] = s.fileTag;
@@ -95,7 +94,8 @@ inline State stateFromJson(const QJsonObject& o) {
     s.paper = str("paper", s.paper);
     if (s.paper != "A0" && s.paper != "A3" && s.paper != "A4") s.paper = "A4";
     s.landscape = boo("landscape", s.landscape); s.autoOrient = boo("autoOrient", s.autoOrient);
-    s.margin = num("margin", s.margin); s.overlap = num("overlap", s.overlap);
+    s.margin = num("margin", s.margin);
+    if (o.contains("overlap")) s.margin = std::max(s.margin, num("overlap", 10));  // old 页边距+重叠区 template: keep the frame position
     s.offX = std::max(0.0, num("offX", 0)); s.offY = std::max(0.0, num("offY", 0));
     s.singlePage = boo("singlePage", s.singlePage); s.pageNumbers = boo("pageNumbers", s.pageNumbers);
     s.calibBox = boo("calibBox", s.calibBox); s.alignMarks = boo("alignMarks", s.alignMarks);

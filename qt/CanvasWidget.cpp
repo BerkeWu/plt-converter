@@ -65,6 +65,31 @@ void CanvasWidget::setSelectTool(bool on) {
 
 void CanvasWidget::setHighlightCell(int r, int c) { hiR_ = r; hiC_ = c; update(); }
 
+QPoint CanvasWidget::testCellCenter(int row, int col) const {
+    if (!grid_.valid) return {};
+    return toScreen(QPointF(grid_.strip + (col + 0.5) * grid_.Wp, grid_.strip + (row + 0.5) * grid_.Hp)).toPoint();
+}
+
+int CanvasWidget::cellAt(const QPointF& worldMm) const {
+    if (!grid_.valid || grid_.singlePage) return -1;
+    const double x = worldMm.x() - grid_.strip, y = worldMm.y() - grid_.strip;
+    if (x < 0 || y < 0) return -1;
+    const int c = static_cast<int>(x / grid_.Wp), r = static_cast<int>(y / grid_.Hp);
+    if (c < 0 || c >= grid_.nx || r < 0 || r >= grid_.ny) return -1;
+    return r * 10000 + c;
+}
+
+int CanvasWidget::clickableCellAt(const QPointF& worldMm, bool& blankIt) const {
+    const int key = cellAt(worldMm);
+    if (key < 0) return -1;
+    const bool exists = grid_.allPresent || grid_.present.contains(key);
+    if (!exists) return -1;
+    const bool blank = grid_.blank.contains(key), manual = grid_.manual.contains(key);
+    if (blank && !manual) return -1;   // auto-empty, nothing to blank or restore here
+    blankIt = !blank;                  // has content -> clicking blanks it; manually blanked -> clicking restores it
+    return key;
+}
+
 QRectF CanvasWidget::gridRect() const {
     if (!grid_.valid) return {};
     return QRectF(0, 0, grid_.nx * grid_.Wp + 2 * grid_.strip, grid_.ny * grid_.Hp + 2 * grid_.strip);
@@ -168,10 +193,12 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         dash.setStyle(Qt::DashLine);
         for (int r = 0; r < grid_.ny; ++r)
             for (int c = 0; c < grid_.nx; ++c) {
+                const int key = r * 10000 + c;
+                const bool exists = grid_.allPresent || grid_.present.contains(key);
+                const bool show = exists && !grid_.blank.contains(key);
                 const QRectF cell(st + c * grid_.Wp, st + r * grid_.Hp, grid_.Wp, grid_.Hp);
-                const bool present = grid_.allPresent || grid_.present.contains(r * 10000 + c);
                 p.setPen(dash);
-                p.setBrush(present ? QColor(255, 255, 255, 110) : QColor(200, 208, 207, 170));
+                p.setBrush(show ? QColor(255, 255, 255, 110) : QColor(200, 208, 207, 170));
                 p.drawRect(cell);
             }
         if (!grid_.singlePage && st > 0) {   // sheets overlap here: each seam carries 2 * strip of duplicated pattern
@@ -233,12 +260,19 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         p.setFont(f);
         for (int r = 0; r < grid_.ny; ++r)
             for (int c = 0; c < grid_.nx; ++c) {
+                const int key = r * 10000 + c;
+                const bool exists = grid_.allPresent || grid_.present.contains(key);
+                const bool blank = exists && grid_.blank.contains(key);
+                const bool manual = exists && grid_.manual.contains(key);
+                const bool show = exists && !blank;
                 const QRectF cell(toScreen(QPointF(st + c * grid_.Wp, st + r * grid_.Hp)), QSizeF(grid_.Wp * scale_, grid_.Hp * scale_));
-                const bool present = grid_.allPresent || grid_.present.contains(r * 10000 + c);
                 if (cell.width() > 46 && cell.height() > 24) {
-                    p.setPen(present ? QColor("#334444") : QColor("#8A9796"));
+                    p.setPen(show ? QColor("#334444") : QColor("#8A9796"));
                     p.drawText(cell.topLeft() + QPointF(6, 16), grid_.singlePage ? tr("单页") : QStringLiteral("%1-%2").arg(r + 1).arg(c + 1));
-                    if (!present) { p.setPen(QColor("#8A9796")); p.drawText(cell, Qt::AlignCenter, tr("空白")); }
+                    if (!show) {
+                        p.setPen(QColor("#8A9796"));
+                        p.drawText(cell, Qt::AlignCenter, manual ? tr("空白·点击恢复") : tr("空白"));
+                    }
                 }
                 if (r == hiR_ && c == hiC_) { p.setPen(QPen(QColor("#0B7A70"), 2.5)); p.setBrush(Qt::NoBrush); p.drawRect(cell); }
             }
@@ -335,12 +369,20 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
         const QPointF c(std::clamp(w.x(), 0.0, view_->w), std::clamp(w.y(), 0.0, view_->h));
         sel_ = QRectF(selAnchor_, c).normalized();
         update();
+    } else if (mode_ == Layout && !space_) {
+        bool blankIt = false;
+        setCursor(clickableCellAt(toWorld(e->position()), blankIt) >= 0 ? Qt::PointingHandCursor : Qt::ArrowCursor);
     }
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
-    Q_UNUSED(e);
-    if (drag_ == Move) emit offsetEdited(off_, true);
+    if (drag_ == Move) {
+        const QPointF moved = e->position() - dragStartScreen_;
+        bool blankIt = false;
+        const int key = moved.manhattanLength() <= 4 ? clickableCellAt(toWorld(e->position()), blankIt) : -1;
+        if (key >= 0) emit cellClicked(key / 10000, key % 10000);
+        else emit offsetEdited(off_, true);
+    }
     if (drag_ != None) setCursor(selectTool_ ? Qt::CrossCursor : Qt::ArrowCursor);
     drag_ = None;
     if (selecting_) {

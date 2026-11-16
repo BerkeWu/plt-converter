@@ -19,7 +19,7 @@
 QString friendlyError(const QString& m) {
     if (m.contains("no drawable lines")) return QObject::tr("文件中没有可绘制的线条（0 条线）。");
     if (m.contains("no commands found")) return QObject::tr("这不是有效的 PLT（HP-GL）文件，无法识别其中的绘图指令。");
-    if (m.contains("margin/overlap")) return QObject::tr("页边距或重叠区过大，当前纸张无可打印区域，请调小。");
+    if (m.contains("margin too large")) return QObject::tr("页边距过大，当前纸张无可打印区域，请调小。");
     if (m.contains("cannot open")) return QObject::tr("源文件不可访问（已被移动、删除、占用或没有读取权限）。");
     return m;
 }

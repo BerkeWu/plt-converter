@@ -1,5 +1,5 @@
-// CLI: plt2pdf <file.plt> [-o dir] [--paper A4|A3|A0] [--orient auto|portrait|landscape] [--margin 5]
-//      [--overlap 10] [--overview] [--no-calib] [--no-pageno] [--keep-empty]
+// CLI: plt2pdf <file.plt> [-o dir] [--paper A4|A3|A0] [--orient auto|portrait|landscape] [--margin 10]
+//      [--overview] [--no-calib] [--no-pageno] [--keep-empty]
 #include <cstdlib>
 #include <vector>
 #ifdef _WIN32
@@ -39,7 +39,7 @@ static std::vector<std::string> utf8Args(int argc, char** argv) {
 int main(int argc, char** argv) {
     const std::vector<std::string> args = utf8Args(argc, argv);
     argc = int(args.size());
-    if (argc < 2) { std::cerr << "usage: plt2pdf file.plt [-o dir] [--paper A4] [--orient auto] [--margin 5] [--overlap 10] [--overview]\n"; return 2; }
+    if (argc < 2) { std::cerr << "usage: plt2pdf file.plt [-o dir] [--paper A4] [--orient auto] [--margin 10] [--overview]\n"; return 2; }
     namespace fs = std::filesystem;
     fs::path in = fs::u8path(args[1]), outDir = in.parent_path();
     std::string orient = "auto";
@@ -53,7 +53,6 @@ int main(int argc, char** argv) {
         else if (a == "--paper") p.paper = layout::paperByName(val());
         else if (a == "--orient") orient = val();
         else if (a == "--margin") p.margin = std::atof(val().c_str());
-        else if (a == "--overlap") p.overlap = std::atof(val().c_str());
         else if (a == "--overview") p.overview = true;
         else if (a == "--no-calib") p.calibBox = false;
         else if (a == "--no-pageno") p.pageNumbers = false;

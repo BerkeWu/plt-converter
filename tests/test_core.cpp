@@ -68,8 +68,8 @@ int main(int argc, char** argv) {
         layout::Params cp; cp.lineR = 1; cp.lineG = 0; cp.lineB = 0; cp.calibBox = false; cp.alignMarks = false;
         layout::Plan cpl = layout::buildPlan(d, cp);
         CHECK(!cpl.pages.empty() && cpl.pages[0].paths[0].style.r == 1, "line colour applied to pattern");
-        // 170 x 100 mm on A4 portrait (Wp = 200): fits; landscape fits. Use 230 x 100: portrait needs 2 columns when offset 0 -> shift hint
-        plt::Document w = plt::parseString("IN;PU0,0;PD7200,0,7200,4000,0,4000,0,0;");  // 180 x 100
+        // 190 x 100 mm on A4 portrait (frame width Wp = 190): fits at offset 0, needs 2 columns once shifted right by 30 mm -> shift hint
+        plt::Document w = plt::parseString("IN;PU0,0;PD7600,0,7600,4000,0,4000,0,0;");  // 190 x 100
         layout::Params hp; hp.orient = layout::Orient::Portrait; hp.calibBox = false; hp.offX = 30;
         layout::ShiftHint sh = layout::shiftHint(w, hp);
         CHECK(sh.found && sh.dx < 0 && sh.from > sh.to, "shift hint: move left reduces pages");
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     // 1c'. pages the user set to blank by hand: lines gone, sheet (number + marks) still output, even when empty pages are skipped
     {
         plt::Document d = plt::parseString("IN;PU0,0;PD12000,0,12000,8000,0,8000,0,0;");  // 300 x 200 mm -> two landscape A4 pages
-        layout::Params p; p.orient = layout::Orient::Landscape; p.calibBox = false; p.overview = false; p.margin = 0; p.overlap = 10;
+        layout::Params p; p.orient = layout::Orient::Landscape; p.calibBox = false; p.overview = false; p.margin = 10;
         layout::Plan a = layout::buildPlan(d, p);
         CHECK(a.pages.size() == 2 && a.effectivePages == 2, "blank-page test base: two pages with pattern");
         p.blankLabels = {"1-2"};
@@ -142,10 +142,10 @@ int main(int argc, char** argv) {
         }
         {   // registration frame (拼接框): dashed lines edge to edge, ONE "+" per corner, pattern also printed outside the frame
             plt::Document d2 = plt::parseString("IN;PU0,0;PD12000,0;PU11360,0;PD11360,7200;");  // 300 mm baseline + a vertical line at u = 284 mm
-            layout::Params q; q.orient = layout::Orient::Landscape; q.calibBox = false; q.overview = false; q.margin = 5; q.overlap = 10;
+            layout::Params q; q.orient = layout::Orient::Landscape; q.calibBox = false; q.overview = false; q.margin = 10;
             layout::Plan pl = layout::buildPlan(d2, q);
             CHECK(pl.nx == 2 && pl.ny == 1 && pl.pages.size() == 2, "300 mm wide on landscape A4 = 2 pages");
-            CHECK(pl.inset == 10 && pl.strip == 5 && std::fabs(pl.Wp - 277) < 1e-9, "frame sits 10 mm inside the sheet edge, 5 mm of pattern printed outside it, frame 277 mm wide");
+            CHECK(pl.inset == 10 && pl.strip == 10 && std::fabs(pl.Wp - 277) < 1e-9, "frame sits 10 mm inside the sheet edge, the whole 10 mm strip outside it carries pattern, frame 277 mm wide");
             auto isBlue = [](const layout::Path& pa) { return pa.style.b > 0.8 && pa.style.r < 0.3; };
             std::set<long> uLines[2];
             for (int i = 0; i < 2; ++i) {
@@ -160,13 +160,13 @@ int main(int argc, char** argv) {
             }
             int common = 0;
             for (long u : uLines[0]) if (uLines[1].count(u)) ++common;
-            CHECK(common == 1 && uLines[0].count(282000), "page 1's right frame line and page 2's left frame line are the same line (u = 282 mm)");
+            CHECK(common == 1 && uLines[0].count(277000), "page 1's right frame line and page 2's left frame line are the same line (u = 277 mm)");
             auto hasVertical = [&](const layout::Page& pg, double x) {
                 for (auto& pa : pg.paths) if (!isBlue(pa) && pa.pts.size() == 2 && std::fabs(pa.pts[0].x - x) < 1e-6 && std::fabs(pa.pts[1].x - x) < 1e-6) return true;
                 return false;
             };
-            CHECK(hasVertical(pl.pages[0], 289) && hasVertical(pl.pages[1], 12), "a line across the seam is printed on BOTH sheets (page 1 outside its frame, page 2 inside it)");
-            CHECK(std::fabs((289 - 12) - pl.Wp) < 1e-9, "…and the two copies are exactly one frame width apart, so overlaid sheets coincide");
+            CHECK(hasVertical(pl.pages[0], 294) && hasVertical(pl.pages[1], 17), "a line across the seam is printed on BOTH sheets (page 1 outside its frame, page 2 inside it)");
+            CHECK(std::fabs((294 - 17) - pl.Wp) < 1e-9, "…and the two copies are exactly one frame width apart, so overlaid sheets coincide");
         }
         layout::Params p; p.alignR = 1; p.alignG = 0; p.alignB = 0; p.calibBox = false;
         bool red = false;
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
             for (auto& u : doc.unsupported) std::cout << "  unsupported cmd " << u.first << " x" << u.second << "\n";
             for (const char* pn : {"A4", "A3", "A0"}) {
                 layout::Params p; p.paper = layout::paperByName(pn);
-                p.calibBox = false; p.alignMarks = false; p.pageNumbers = false; p.margin = 0; p.overlap = 0.0001; p.skipEmpty = true;
+                p.calibBox = false; p.alignMarks = false; p.pageNumbers = false; p.margin = 0.0001; p.skipEmpty = true;
                 for (auto o : {layout::Orient::Portrait, layout::Orient::Landscape}) {
                     p.orient = o;
                     layout::Plan pl = layout::buildPlan(doc, p);
@@ -282,11 +282,11 @@ int main(int argc, char** argv) {
             }
             layout::Params ov; ov.overview = true; ov.orient = layout::Orient::Portrait;
             layout::Plan pl = layout::buildPlan(doc, ov);
-            CHECK(pl.pages.front().overview && pl.pages.front().label.empty(), "overview page first, no page number label");
+            CHECK(pl.pages.back().overview && pl.pages.back().label.empty(), "overview page last, no page number label");
             bool hasNumber = false;
-            for (auto& t : pl.pages.front().texts) if (t.boxed) hasNumber = true;
+            for (auto& t : pl.pages.back().texts) if (t.boxed) hasNumber = true;
             CHECK(!hasNumber, "overview page has no page number");
-            CHECK(pl.pages[1].label == "1-1" || pl.pages[1].row == 0, "first grid page after overview");
+            CHECK(pl.pages.front().label == "1-1" || pl.pages.front().row == 0, "first grid page comes before the overview");
         }
     }
     // PLT stroke-label removal: a label drawn with line strokes ("小红叶" style), copies of different size / mirrored / turned

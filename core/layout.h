@@ -19,8 +19,8 @@ inline const char* orientChar(Orient o) { return o == Orient::Landscape ? "横" 
 struct Params {
     Paper paper{"A4", 210, 297};
     Orient orient = Orient::Landscape;
-    double margin = 5;       // mm: nothing is printed closer than this to the sheet edge
-    double overlap = 10;     // mm: width of the strip printed OUTSIDE the registration frame (frame inset = max(overlap, margin))
+    double margin = 10;      // mm: sheet edge -> registration frame ("拼接框"/页边距线); the whole strip from the edge up to
+                              // this line carries the overlap pattern printed outside the frame (see tileGeometry below)
     double offX = 0, offY = 0;  // graph offset inside the page grid (mm, >= 0)
     bool pageNumbers = true;
     bool calibBox = true;    // 5x5 cm square, first page only
@@ -34,7 +34,7 @@ struct Params {
     double lineR = 0, lineG = 0, lineB = 0;  // pattern line colour (helper lines / page numbers stay black)
     std::vector<std::string> blankLabels;  // pages ("行-列") the user set to blank by hand: pattern removed, sheet still output (marks + number)
     std::string fileTag;     // batch: short file name printed next to the page number (UTF-8, empty = off)
-    bool singlePage = false;  // whole drawing on ONE page (page = drawing + 2*margin); no overlap/page number/align marks
+    bool singlePage = false;  // whole drawing on ONE page (page = drawing + 2*margin); no page number/align marks
     std::string topMark = "好样纸样plt转换器";
     std::string bottomMark = "打印时，打印比例请选择「按实际」或「100%」";
     std::string overviewTitle = "拼接效果图";
@@ -71,17 +71,16 @@ struct Plan {
     int blankPages = 0;
     int effectivePages = 0;            // non-empty pages (what the user must print/assemble)
     bool calibCollision = false;
-    std::vector<Page> pages;           // output order (overview first if enabled); skipEmpty applied
+    std::vector<Page> pages;           // output order (overview last if enabled); skipEmpty applied
 };
 
-// Tiling geometry. The registration frame ("拼接框") sits max(overlap, margin) inside the sheet edge; frames of neighbouring
-// pages abut (tile step = frame size).  Pattern lines are also printed in the strip outside the frame, up to `margin` from the
+// Tiling geometry. The registration frame ("拼接框") sits `margin` inside the sheet edge; frames of neighbouring pages abut
+// (tile step = frame size). Pattern lines are also printed in the whole strip outside the frame, all the way to the sheet
 // edge, so laying a sheet over its neighbour with the dashed frame lines coincident shows continuous pattern lines.
-// With the defaults (margin 5, overlap 10) the page counts equal the old "windows overlapping by 10 mm" model.
 struct TileGeom {
     double pageW = 0, pageH = 0, inset = 0, strip = 0, fw = 0, fh = 0;
     int nx = 1, ny = 1;
-    bool ok = false;   // false: margin / overlap leave no usable frame on this paper
+    bool ok = false;   // false: margin leaves no usable frame on this paper
 };
 TileGeom tileGeometry(const Params& p, double drawingW, double drawingH);  // uses p.offX / p.offY
 

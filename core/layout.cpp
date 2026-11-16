@@ -25,8 +25,8 @@ TileGeom tileGeometry(const Params& p, double w, double h) {
     const bool portrait = p.orient == Orient::Portrait;
     g.pageW = portrait ? p.paper.w : p.paper.h;
     g.pageH = portrait ? p.paper.h : p.paper.w;
-    g.inset = std::max(p.overlap, p.margin);
-    g.strip = g.inset - p.margin;
+    g.inset = p.margin;
+    g.strip = g.inset;   // the whole strip from the frame line out to the sheet edge carries overlap pattern
     g.fw = g.pageW - 2 * g.inset;
     g.fh = g.pageH - 2 * g.inset;
     g.ok = g.fw > 20 && g.fh > 20;
@@ -115,7 +115,7 @@ double numberBoxW(const std::string& label) { return label.size() * 0.62 * kNumP
 double numberBoxH() { return kCapRatio * kNumPt * kPtMm + 2 * kBoxPadMm; }
 // Box of the page number in page coordinates (landscape: top-left of the printable area, portrait: bottom centre).
 void numberBox(const Page& pg, const Params& p, bool portrait, double& x0, double& y0, double& x1, double& y1) {
-    const double ins = std::max({p.overlap, p.margin, kSafe}), w = numberBoxW(pg.label), h = numberBoxH();   // inside the registration frame
+    const double ins = std::max(p.margin, kSafe), w = numberBoxW(pg.label), h = numberBoxH();   // inside the registration frame
     if (portrait) { x0 = pg.w / 2 - w / 2; y1 = pg.h - ins - kLift - 4; y0 = y1 - h; x1 = x0 + w; }
     else { x0 = ins + 3.5; y0 = ins + 3.5; x1 = x0 + w; y1 = y0 + h; }  // 3.5 mm: clear of the corner mark
 }
@@ -215,7 +215,7 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
         portrait = plan.pageW < plan.pageH;
     } else {
         TileGeom g = tileGeometry(p, w, h);
-        if (!g.ok) throw std::runtime_error("margin/overlap too large for this paper");
+        if (!g.ok) throw std::runtime_error("margin too large for this paper");
         plan.pageW = g.pageW; plan.pageH = g.pageH;
         plan.Wp = g.fw; plan.Hp = g.fh; plan.inset = g.inset; plan.strip = g.strip;
         plan.nx = g.nx; plan.ny = g.ny;
@@ -283,7 +283,7 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
         }
         plan.pages.push_back(std::move(pg));
     }
-    if (p.overview && !single) plan.pages.insert(plan.pages.begin(), makeOverview(doc, p, plan));
+    if (p.overview && !single) plan.pages.push_back(makeOverview(doc, p, plan));
     return plan;
 }
 
