@@ -240,10 +240,11 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
         for (int c = 0; c < plan.nx; ++c) {
             Page pg; pg.w = plan.pageW; pg.h = plan.pageH; pg.row = r; pg.col = c;
             pg.label = std::to_string(r + 1) + "-" + std::to_string(c + 1);
-            // printed window of page (r,c) = [c*Wp, c*Wp + Wp + 2*strip]: the frame sits `strip` inside it (frames abut, windows overlap by 2*strip)
+            // printed window of page (r,c) = [c*Wp - strip, c*Wp + Wp + strip]: the frame sits `strip` inside it on EVERY
+            // side (frames abut, each neighbouring pair of windows overlaps by 2*strip split evenly between them)
             const double u0 = c * plan.Wp, v0 = r * plan.Hp;
             const double eps = single ? 1e-6 : 0;
-            for (size_t li = 0; li < L.size(); ++li) clipPolyline(L[li], u0, v0, u0 + plan.Wp + 2 * plan.strip + eps, v0 + plan.Hp + 2 * plan.strip + eps, p.margin - u0, p.margin - v0, LS[li], pg.paths);
+            for (size_t li = 0; li < L.size(); ++li) clipPolyline(L[li], u0 - plan.strip, v0 - plan.strip, u0 + plan.Wp + plan.strip + eps, v0 + plan.Hp + plan.strip + eps, p.margin - u0, p.margin - v0, LS[li], pg.paths);
             // a sheet is blank when its FRAME holds no line: lines of neighbours reaching into its strip do not make it necessary.
             // On the outer sides of the grid there is no neighbour, so the strip there belongs to this sheet.
             const double tx0 = c == 0 ? p.margin : plan.inset, tx1 = c == plan.nx - 1 ? plan.pageW - p.margin : plan.pageW - plan.inset;

@@ -168,6 +168,23 @@ int main(int argc, char** argv) {
             CHECK(hasVertical(pl.pages[0], 294) && hasVertical(pl.pages[1], 17), "a line across the seam is printed on BOTH sheets (page 1 outside its frame, page 2 inside it)");
             CHECK(std::fabs((294 - 17) - pl.Wp) < 1e-9, "…and the two copies are exactly one frame width apart, so overlaid sheets coincide");
         }
+        {   // regression: a page's own left/top strip must carry pattern just like its right/bottom strip (bug: the clip
+            // window used to run from the frame line out to the sheet edge on the right/bottom only, leaving the
+            // left/top strip of EVERY page blank whenever margin > 0 — invisible at the old margin=0 default)
+            plt::Document d3 = plt::parseString("IN;PU0,0;PD28000,0,28000,4000,0,4000,0,0;");  // 700 x 100 mm rectangle outline
+            layout::Params r; r.orient = layout::Orient::Landscape; r.calibBox = false; r.overview = false; r.alignMarks = false; r.pageNumbers = false; r.margin = 10; r.skipEmpty = false;
+            layout::Plan pl = layout::buildPlan(d3, r);
+            CHECK(pl.nx >= 3 && pl.ny == 1, "wide enough for a true interior column (no neighbour-page special-casing)");
+            const layout::Page* mid = nullptr;
+            for (auto& pg : pl.pages) if (!pg.overview && pg.col == 1) mid = &pg;
+            CHECK(mid != nullptr, "found the interior page");
+            if (mid) {
+                double minx = 1e9, maxx = -1e9;
+                for (auto& pa : mid->paths) for (auto& pt : pa.pts) { minx = std::min(minx, pt.x); maxx = std::max(maxx, pt.x); }
+                CHECK(minx < 1e-6, "interior page: pattern reaches its OWN left edge (local x=0), not just as far as the margin line");
+                CHECK(std::fabs(maxx - mid->w) < 1e-6, "…and its own right edge too (local x=pageW) — symmetric strip on both sides");
+            }
+        }
         layout::Params p; p.alignR = 1; p.alignG = 0; p.alignB = 0; p.calibBox = false;
         bool red = false;
         for (auto& pa : layout::buildPlan(d, p).pages.front().paths) if (pa.style.dashed && pa.style.r == 1 && pa.style.b == 0) red = true;
