@@ -1472,7 +1472,9 @@ void MainWindow::batchStartExport(bool retryOnly) {
     if (!retryOnly) results_.clear();
     for (int i : targets) {
         BatchItem& it = *items_[i];
-        const QString dir = opts_.outDir.isEmpty() ? QFileInfo(it.path).absolutePath() : opts_.outDir;
+        const QString base = opts_.outDir.isEmpty() ? QFileInfo(it.path).absolutePath() : opts_.outDir;
+        // group outputs by paper format in a subfolder (A4/A3/A0/单页) so files of the same size land together
+        const QString dir = QDir(base).filePath(it.state.singlePage ? tr("单页") : it.state.paper);
         QDir().mkpath(dir);
         it.exportFailed = false;
         it.error.clear();
@@ -1537,7 +1539,12 @@ void MainWindow::batchStartExport(bool retryOnly) {
                     std::filesystem::rename(fsOf(tmp), fsOf(target), ec);
                     if (ec) { std::filesystem::remove(fsOf(target), ec); std::filesystem::rename(fsOf(tmp), fsOf(target), ec); }
                 }
-                if (sr.ok && !ec) r.outPath = target;
+                if (sr.ok && !ec) {
+                    r.outPath = target;
+                    // batch export + watermark: keep ONLY the watermarked PDF, not the clean intermediate one
+                    // (when the stamp suffix is empty, target == out already and there is nothing extra to remove)
+                    if (target != out) { std::error_code rmEc; std::filesystem::remove(fsOf(out), rmEc); }
+                }
                 else std::filesystem::remove(fsOf(tmp), ec);   // best-effort: the export itself still succeeded, keep the unstamped file
             }
 #endif

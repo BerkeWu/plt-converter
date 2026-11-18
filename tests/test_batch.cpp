@@ -1,6 +1,7 @@
 // Headless batch-conversion test (PRD 4.9 acceptance scenarios).
 #include <QApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QCheckBox>
@@ -17,6 +18,9 @@
 
 #include "../qt/MainWindow.h"
 #include "../core/layout.h"
+#ifdef PLT_WITH_WM
+#include "../qt/Stamp.h"
+#endif
 
 static int fails = 0;
 #define CHECK(c, msg) do { if (!(c)) { ++fails; std::cout << "  FAIL: " << msg << "\n"; } else std::cout << "  ok: " << msg << "\n"; } while (0)
@@ -34,6 +38,13 @@ static bool waitFor(MainWindow& w, void (MainWindow::*sig)(), int ms = 60000) {
 static bool waitPlan(MainWindow& w) { return waitFor(w, &MainWindow::planReady, 15000); }
 static void pump(int ms) { QEventLoop l; QTimer::singleShot(ms, &l, &QEventLoop::quit); l.exec(); }
 static int count(MainWindow& w, ItemStatus s) { int n = 0; for (auto& it : w.batchItems()) if (it->status == s) ++n; return n; }
+// batch output now groups PDFs one level down, in a per-paper-format subfolder (A4/A3/A0/单页) — scan recursively.
+static QStringList filesUnder(const QString& dir, const QString& pattern) {
+    QStringList r;
+    QDirIterator it(dir, {pattern}, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) r << it.next();
+    return r;
+}
 static bool allAuto(MainWindow& w) { for (auto& it : w.batchItems()) if (it->valid() && !it->haveAuto) return false; return true; }
 static void waitAuto(MainWindow& w) { if (!allAuto(w)) waitFor(w, &MainWindow::batchAutoFinished); }
 static void waitScan(MainWindow& w) { int guard = 0; while (count(w, ItemStatus::Scanning) > 0 && guard++ < 600) pump(50); }
@@ -271,11 +282,11 @@ int main(int argc, char** argv) {
     w.batchPause(false);
     CHECK(waitFor(w, &MainWindow::batchExportFinished), "export finished");
     QDir od(out);
-    const QStringList pdfs = od.entryList({"*.pdf"}, QDir::Files);
+    const QStringList pdfs = filesUnder(out, "*.pdf");
     CHECK(pdfs.size() == 17, "17 PDFs produced; the 3 corrupt files did not stop the batch");
-    CHECK(od.entryList({"*.part"}, QDir::Files).isEmpty(), "no temporary files left behind");
+    CHECK(filesUnder(out, "*.part").isEmpty(), "no temporary files left behind");
     {
-        QFile pf(od.filePath(pdfs.first())); pf.open(QIODevice::ReadOnly);
+        QFile pf(pdfs.first()); pf.open(QIODevice::ReadOnly);
         const QByteArray b = pf.readAll();
         CHECK(b.contains("/PrintScaling /None") && !b.contains("/ca 0") && !b.contains("/CA 0"), "batch PDFs: no transparency and print scaling off");
     }
@@ -294,8 +305,8 @@ int main(int argc, char** argv) {
     pump(30);
     w.batchCancel();
     CHECK(waitFor(w, &MainWindow::batchExportFinished), "cancel finishes");
-    CHECK(od.entryList({"*.part"}, QDir::Files).isEmpty(), "cancel removes unfinished temporary files");
-    const QStringList after = od.entryList({"*.pdf"}, QDir::Files);
+    CHECK(filesUnder(out, "*.part").isEmpty(), "cancel removes unfinished temporary files");
+    const QStringList after = filesUnder(out, "*.pdf");
     CHECK(after.size() >= 17, "cancel keeps completed files");
     bool suffixed = false;
     for (auto& n : after) if (n.contains("_2.pdf")) suffixed = true;
@@ -310,7 +321,41 @@ int main(int argc, char** argv) {
     w.batchOptions().outDir = root + "/out2";
     w.batchStartExport(true);
     CHECK(waitFor(w, &MainWindow::batchExportFinished), "retry finished");
-    CHECK(QDir(root + "/out2").entryList({"*.pdf"}, QDir::Files).size() == 17, "「仅重试失败项」 exports the failed files");
+    CHECK(filesUnder(root + "/out2", "*.pdf").size() == 17, "「仅重试失败项」 exports the failed files");
+
+#ifdef PLT_WITH_WM
+    // ---------- batch export + 「导出时添加水印」: only the watermarked PDF is kept, no clean leftover ----------
+    {
+        StampSettings ss; ss.text = "test"; ss.suffix = "_水印"; ss.askEveryTime = false;
+        ss.save();
+        MainWindow w2;
+        w2.setSilent(true);
+        w2.show();
+        w2.setBatchMode(true);
+        const QStringList wmSrc = {valid[0], valid[1]};
+        w2.addBatchFiles(wmSrc);
+        waitScan(w2);
+        w2.goBatchStep(1);
+        w2.goBatchStep(2);
+        waitAuto(w2);
+        w2.batchConfirmAll();
+        w2.goBatchStep(4);
+        QCheckBox* stampOnExport2 = nullptr;
+        for (auto* c : w2.findChildren<QCheckBox*>()) if (c->text().startsWith(QObject::tr("导出时添加水印"))) stampOnExport2 = c;
+        CHECK(stampOnExport2, "second window also has the export-time stamp checkbox");
+        if (stampOnExport2) stampOnExport2->setChecked(true);
+        const QString wmOut = root + "/wmout";
+        w2.batchOptions().outDir = wmOut;
+        w2.batchOptions().concurrency = 2;
+        w2.batchStartExport();
+        CHECK(waitFor(w2, &MainWindow::batchExportFinished), "stamped batch export finished");
+        const QStringList wmPdfs = filesUnder(wmOut, "*.pdf");
+        CHECK(wmPdfs.size() == 2, "exactly one PDF per source file (not two) when export-time watermark is on");
+        bool allStamped = true;
+        for (auto& f : wmPdfs) if (!f.contains(QStringLiteral("_水印"))) allStamped = false;
+        CHECK(allStamped, "the kept file is the watermarked one (has the stamp suffix), the clean intermediate was removed");
+    }
+#endif
 
     // ---------- session round trip (crash recovery file, PRD 4.6) ----------
     {

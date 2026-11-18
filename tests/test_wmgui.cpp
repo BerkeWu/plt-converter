@@ -1,6 +1,7 @@
 // Offscreen test of the 水印处理 panel: add -> analyse/group -> recipe (text + boxed shape) -> run -> report.
 #include <QApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
@@ -619,7 +620,8 @@ private slots:
         QSignalSpy expDone(&w, &MainWindow::batchExportFinished);
         w.batchStartExport();
         if (expDone.isEmpty()) QVERIFY(expDone.wait(300000));
-        qInfo() << "batch export: cpu" << cpu() - c0 << "worst stall ms" << worst << "pdfs" << QDir(out.filePath("batch")).entryList({"*.pdf"}).size();
+        int pdfCount = 0; { QDirIterator pit(out.filePath("batch"), {"*.pdf"}, QDir::Files, QDirIterator::Subdirectories); while (pit.hasNext()) { pit.next(); ++pdfCount; } }
+        qInfo() << "batch export: cpu" << cpu() - c0 << "worst stall ms" << worst << "pdfs" << pdfCount;
         QVERIFY2(worst < 800, "batch export stalls the UI");
         c0 = cpu(); QTest::qWait(3000);
         qInfo() << "idle cpu after batch in 3 s:" << cpu() - c0;
