@@ -61,6 +61,7 @@ struct PlanResult {
     layout::ShiftHint hint;
     QString largerPaper;
     int largerGain = 0;
+    QSet<int> recoverable;   // r*10000+c of pages skipped (not in `meta`) but with real margin-strip content: clickable in the canvas to bring back
 };
 
 
@@ -267,6 +268,7 @@ private:
     void updateSummary();
     void rebuildThumbLists();
     void setPagesBlank(const QVector<int>& rows, bool blank);   // 手动空白页：把选中的页设为空白 / 恢复内容
+    void setLabelsBlank(const QStringList& labels, bool blank); // same, by page label directly (no meta_ entry needed yet)
     void updateBlankButtons();
     void pageContextMenu(QListWidget* list, const QPoint& pos);
     // actions
@@ -367,7 +369,7 @@ private:
     ToggleSwitch* fileTagSw_ = nullptr;
     QWidget* fileTagRow_ = nullptr;
     QDoubleSpinBox *marginSpin_ = nullptr, *lineWidthSpin_ = nullptr, *calibSpin_ = nullptr, *xSpin_ = nullptr, *ySpin_ = nullptr;
-    ToggleSwitch *singleSw_ = nullptr, *pageNoSw_ = nullptr, *calibSw_ = nullptr, *overviewSw_ = nullptr, *alignSw_ = nullptr, *blankSw_ = nullptr;
+    ToggleSwitch *singleSw_ = nullptr, *pageNoSw_ = nullptr, *calibSw_ = nullptr, *overviewSw_ = nullptr, *alignSw_ = nullptr, *blankSw_ = nullptr, *safeMarginSw_ = nullptr;
     QLabel* colorNote_ = nullptr;
     QList<Swatch*> swatches_;  // 0 = 原色, 1..5 preset, 6 = custom
     QList<Swatch*> alignSwatches_;  // 0..4 preset (0 = blue), 5 = custom

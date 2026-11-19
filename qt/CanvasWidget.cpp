@@ -83,7 +83,7 @@ int CanvasWidget::clickableCellAt(const QPointF& worldMm, bool& blankIt) const {
     const int key = cellAt(worldMm);
     if (key < 0) return -1;
     const bool exists = grid_.allPresent || grid_.present.contains(key);
-    if (!exists) return -1;
+    if (!exists) return grid_.recoverable.contains(key) ? key : -1;   // skipped but has strip content: click brings it back
     const bool blank = grid_.blank.contains(key), manual = grid_.manual.contains(key);
     if (blank && !manual) return -1;   // auto-empty, nothing to blank or restore here
     blankIt = !blank;                  // has content -> clicking blanks it; manually blanked -> clicking restores it
@@ -264,6 +264,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
                 const bool exists = grid_.allPresent || grid_.present.contains(key);
                 const bool blank = exists && grid_.blank.contains(key);
                 const bool manual = exists && grid_.manual.contains(key);
+                const bool recoverable = !exists && grid_.recoverable.contains(key);
                 const bool show = exists && !blank;
                 const QRectF cell(toScreen(QPointF(st + c * grid_.Wp, st + r * grid_.Hp)), QSizeF(grid_.Wp * scale_, grid_.Hp * scale_));
                 if (cell.width() > 46 && cell.height() > 24) {
@@ -271,7 +272,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
                     p.drawText(cell.topLeft() + QPointF(6, 16), grid_.singlePage ? tr("单页") : QStringLiteral("%1-%2").arg(r + 1).arg(c + 1));
                     if (!show) {
                         p.setPen(QColor("#8A9796"));
-                        p.drawText(cell, Qt::AlignCenter, manual ? tr("空白·点击恢复") : tr("空白"));
+                        p.drawText(cell, Qt::AlignCenter, (manual || recoverable) ? tr("空白·点击恢复") : tr("空白"));
                     }
                 }
                 if (r == hiR_ && c == hiC_) { p.setPen(QPen(QColor("#0B7A70"), 2.5)); p.setBrush(Qt::NoBrush); p.drawRect(cell); }

@@ -36,6 +36,8 @@ public:
         QSet<int> manual;           // subset of `blank` the user set by hand (clickable to restore); a content cell
                                      // (present, not in `blank`) is clickable to blank; an auto-empty cell not in
                                      // `manual` is neither (nothing to toggle there)
+        QSet<int> recoverable;      // NOT present (skipped to save paper) but has real content in its margin strip -
+                                     // clickable the same way a manually-blanked cell is, to bring it back
     };
 
     explicit CanvasWidget(QWidget* parent = nullptr);

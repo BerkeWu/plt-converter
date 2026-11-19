@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -5,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <set>
+#include <utility>
 
 #include "../core/docops.h"
 #include "../core/layout.h"
@@ -184,6 +186,73 @@ int main(int argc, char** argv) {
                 CHECK(minx < 1e-6, "interior page: pattern reaches its OWN left edge (local x=0), not just as far as the margin line");
                 CHECK(std::fabs(maxx - mid->w) < 1e-6, "…and its own right edge too (local x=pageW) — symmetric strip on both sides");
             }
+        }
+        {   // regression: an interior page whose own frame holds no line, but whose margin strip DOES (content crossing
+            // in from a neighbour's side), is auto-skipped to save paper (correct, by design) - but was then impossible
+            // to click back in from the canvas, because skipped pages carry no metadata the UI can act on at all. Fixed
+            // by having buildPlan report such pages via `recoverable`, and by making the existing blankLabels toggle
+            // bidirectional: forcing a naturally-empty page back in (instead of only ever forcing a page blank).
+            // Geometry: two segments 680mm apart with a gap between them; each sits inside ONE outer column's own frame
+            // and only grazes the middle column's margin strip (not its frame) - middle column: strip has content, frame
+            // doesn't, so it's auto-skipped yet "recoverable".
+            plt::Document d4 = plt::parseString("IN;PU0,0;PD0,4000;PU800,2080;PD10800,2080;PU22280,2080;PD28000,2080;");
+            layout::Params r2; r2.orient = layout::Orient::Landscape; r2.calibBox = false; r2.overview = false; r2.alignMarks = false; r2.pageNumbers = false; r2.margin = 10;
+            layout::Plan pl2 = layout::buildPlan(d4, r2);
+            CHECK(pl2.nx == 3 && pl2.ny == 1, "3 columns, 1 row");
+            auto findCol = [&](const layout::Plan& pl, int col) -> const layout::Page* {
+                for (auto& pg : pl.pages) if (!pg.overview && pg.col == col) return &pg;
+                return nullptr;
+            };
+            const layout::Page *c0 = findCol(pl2, 0), *c2 = findCol(pl2, 2);
+            CHECK(c0 && !c0->empty, "left column: has its own frame content (not empty)");
+            CHECK(c2 && !c2->empty, "right column: has its own frame content (not empty)");
+            CHECK(findCol(pl2, 1) == nullptr, "middle column: auto-skipped by default (skipEmpty), not in the output pages");
+            CHECK(std::find(pl2.recoverable.begin(), pl2.recoverable.end(), std::make_pair(0, 1)) != pl2.recoverable.end(),
+                  "…but reported as recoverable: its margin strip has real content, just not in its own frame");
+            // simulate the canvas click: add its label to blankLabels (same list used for the opposite direction)
+            layout::Params r3 = r2; r3.blankLabels = {"1-2"};
+            layout::Plan pl3 = layout::buildPlan(d4, r3);
+            const layout::Page* mid2 = findCol(pl3, 1);
+            CHECK(mid2 != nullptr, "forced back in: now present in the output pages");
+            if (mid2) {
+                CHECK(mid2->manual, "flagged manual (never skipped again while the label is set)");
+                CHECK(!mid2->empty && !mid2->paths.empty(), "kept its real (margin-strip) content, not cleared - it actually prints now");
+            }
+            // the ORIGINAL direction must still work unchanged: labelling a page that DOES have its own frame content
+            // still blanks it (clears paths), exactly as before this fix.
+            layout::Params r4 = r2; r4.blankLabels = {"1-1"};
+            layout::Plan pl4 = layout::buildPlan(d4, r4);
+            const layout::Page* c0b = findCol(pl4, 0);
+            CHECK(c0b != nullptr, "a manually-blanked page still outputs its sheet (page number / marks)");
+            if (c0b) CHECK(c0b->manual && c0b->empty && c0b->paths.empty(), "…but with its content cleared, same as before this fix");
+        }
+        {   // safeOuterMargin: the grid's outer sides (no neighbouring page) must not rely on the strip for unique
+            // content, so a printer's own non-printable edge can't silently lose anything there - opt-in (off by
+            // default, so existing layouts/page counts are untouched), since it can need one more page/row.
+            plt::Document d5 = plt::parseString("IN;PU0,0;PD22400,0;");  // 560 mm wide single horizontal line
+            layout::Params off; off.orient = layout::Orient::Landscape; off.calibBox = false; off.overview = false; off.alignMarks = false; off.pageNumbers = false; off.margin = 10;
+            layout::Params on = off; on.safeOuterMargin = true;
+            layout::Plan plOff = layout::buildPlan(d5, off), plOn = layout::buildPlan(d5, on);
+            CHECK(plOn.nx > plOff.nx, "safeOuterMargin needs at least one more column here (same content, less usable width per column)");
+            const double leftSafe = plOn.inset, rightSafe = plOn.pageW - plOn.inset;   // local-x bounds of the printer-safe zone
+            bool anyOutside = false;
+            for (auto& pg : plOn.pages) {
+                if (pg.overview) continue;
+                const bool outerL = pg.col == 0, outerR = pg.col == plOn.nx - 1;
+                if (!outerL && !outerR) continue;
+                for (auto& pa : pg.paths) for (auto& pt : pa.pts) {
+                    if (outerL && pt.x < leftSafe - 1e-6) anyOutside = true;
+                    if (outerR && pt.x > rightSafe + 1e-6) anyOutside = true;
+                }
+            }
+            CHECK(!anyOutside, "safeOuterMargin: no content drawn in the grid's outer strips (left of the first column's margin line, right of the last column's)");
+            double minx = 1e18, maxx = -1e18;
+            for (auto& pg : plOn.pages) {
+                if (pg.overview) continue;
+                const double u0 = pg.col * plOn.Wp;
+                for (auto& pa : pg.paths) for (auto& pt : pa.pts) { minx = std::min(minx, u0 - plOn.inset + pt.x); maxx = std::max(maxx, u0 - plOn.inset + pt.x); }
+            }
+            CHECK(minx < 1e-6 && maxx > 559.9, "…and the line's full 0-560mm extent is still covered somewhere - nothing lost, just moved off the unsafe strip");
         }
         layout::Params p; p.alignR = 1; p.alignG = 0; p.alignB = 0; p.calibBox = false;
         bool red = false;

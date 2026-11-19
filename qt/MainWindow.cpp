@@ -123,6 +123,7 @@ PlanResult computePlan(quint64 gen, std::shared_ptr<const plt::Document> doc, la
         r.nx = plan.nx; r.ny = plan.ny; r.effective = plan.effectivePages; r.blank = plan.blankPages;
         r.gridPages = plan.gridPages; r.calibCollision = plan.calibCollision;
         r.pageW = plan.pageW; r.pageH = plan.pageH;
+        for (const auto& rc : plan.recoverable) r.recoverable.insert(rc.first * 10000 + rc.second);
         const int n = int(plan.pages.size());
         for (int i = 0; i < n; ++i) {
             const auto& pg = plan.pages[i];
@@ -552,6 +553,8 @@ QWidget* MainWindow::buildLayoutPanel() {
     connect(calibSpin_, &QDoubleSpinBox::valueChanged, this, [this](double v) { edit([v](State& s) { s.calibCm = v; }, "calib"); });
     addSwitch(tr("添加拼接效果图（PDF 最后一页）"), overviewSw_, [](State& s, bool v) { s.overview = v; });
     addSwitch(tr("输出空白页"), blankSw_, [](State& s, bool v) { s.keepBlank = v; });
+    addSwitch(tr("最外侧边距保证可打印（可能增加页数）"), safeMarginSw_, [](State& s, bool v) { s.safeOuterMargin = v; });
+    l->addWidget(noteLabel(tr("开启后，纸样最外圈（不与其他页拼接的一侧）不再依赖蓝线外的安全区，打印机自身的不可打印边距也不会丢内容；默认关闭。")));
 
     marginSlider_ = new NoWheelSlider(Qt::Horizontal);
     marginSlider_->setRange(0, 30);
@@ -765,7 +768,9 @@ QWidget* MainWindow::buildCanvasPage() {
     });
     connect(canvas_, &CanvasWidget::cellClicked, this, [this](int row, int col) {
         for (int i = 0; i < meta_.size(); ++i)
-            if (meta_[i].row == row && meta_[i].col == col) { setPagesBlank({i}, !meta_[i].manual); break; }
+            if (meta_[i].row == row && meta_[i].col == col) { setPagesBlank({i}, !meta_[i].manual); return; }
+        // not in meta_: the canvas only allows this click on a skipped-but-recoverable cell, so bring it back
+        setLabelsBlank({QStringLiteral("%1-%2").arg(row + 1).arg(col + 1)}, true);
     });
     connect(canvas_, &CanvasWidget::selectionEdited, this, [this](bool has, QRectF uv, bool) {
         edit([has, uv](State& s) { s.hasSel = has; s.sel = uv; s.offX = s.offY = 0; });
@@ -982,6 +987,7 @@ void MainWindow::updateGridLocal() {
                 if (m.empty) g.blank.insert(key);
                 if (m.manual) g.manual.insert(key);
             }
+            g.recoverable = last_.recoverable;
         }
     }
     canvas_->setGrid(g);
@@ -1066,6 +1072,7 @@ void MainWindow::syncUi() {
     setSw(calibSw_, s_.calibBox);
     setSw(overviewSw_, s_.overview && !single); overviewSw_->setEnabled(!single);
     setSw(blankSw_, s_.keepBlank); blankSw_->setEnabled(!single);
+    setSw(safeMarginSw_, s_.safeOuterMargin); safeMarginSw_->setEnabled(!single);
     calibSpin_->setEnabled(s_.calibBox);
     setSpin(calibSpin_, s_.calibCm);
     setSpin(lineWidthSpin_, s_.lineWidth);
@@ -1192,11 +1199,14 @@ void MainWindow::updateSummary() {
         t = tr("单页输出<br>页面尺寸 %1 × %2 mm").arg(last_.pageW, 0, 'f', 1).arg(last_.pageH, 0, 'f', 1);
     } else {
         t = tr("纸张 <b>%1 %2</b><br>网格 %3 × %4 · 有效页 <b>%5</b> 页").arg(s_.paper, s_.landscape ? tr("横向") : tr("竖向")).arg(last_.nx).arg(last_.ny).arg(last_.effective);
-        int manualN = 0;
-        for (const auto& m : meta_) if (m.manual) ++manualN;
-        const int autoBlank = std::max(0, last_.blank - manualN);
+        // manual pages split both ways: forced blank (still empty, content cleared) vs forced kept (an auto-skippable
+        // page the user clicked back in - it now actually prints, so it's not "blank" even though `manual` is set).
+        int manualBlankN = 0, manualKeptN = 0;
+        for (const auto& m : meta_) if (m.manual) { if (m.empty) ++manualBlankN; else ++manualKeptN; }
+        const int autoBlank = std::max(0, last_.blank - manualBlankN);
         if (autoBlank > 0) t += tr("<br>空白页 %1 页（%2）").arg(autoBlank).arg(s_.keepBlank ? tr("已包含在 PDF 中，可在预览取消勾选") : tr("不输出"));
-        if (manualN > 0) t += tr("<br>手动设为空白页 %1 页（保留页码和对位标记，可在预览取消勾选）").arg(manualN);
+        if (manualBlankN > 0) t += tr("<br>手动设为空白页 %1 页（保留页码和对位标记，可在预览取消勾选）").arg(manualBlankN);
+        if (manualKeptN > 0) t += tr("<br>手动恢复 %1 页（原本因只有拼接重叠内容被跳过，已改为输出）").arg(manualKeptN);
         if (s_.overview) t += tr("<br>含拼接效果图 1 页");
         t += tr("<br>PDF 共 <b>%1</b> 页").arg(meta_.size());
     }
@@ -1246,7 +1256,14 @@ void MainWindow::setPagesBlank(const QVector<int>& rows, bool blank) {
         if (blank ? (m.manual || m.empty) : !m.manual) continue;    // nothing to do for pages that are blank anyway / not set by hand
         labels << m.label;
     }
-    if (labels.isEmpty()) return;
+    setLabelsBlank(labels, blank);
+}
+
+// Shared by setPagesBlank (pages already in meta_) and the canvas click on a skipped-but-recoverable cell (no meta_
+// entry yet to look up): toggles page labels in/out of the one list the layout engine treats as "user overrode this
+// page's presence" - blank=true adds (forces blank if the page had content, forces it kept if it was auto-skippable).
+void MainWindow::setLabelsBlank(const QStringList& labels, bool blank) {
+    if (!havePlan_ || s_.singlePage || labels.isEmpty()) return;
     reselect_ = labels;
     edit([labels, blank](State& s) {
         for (const QString& l : labels) {

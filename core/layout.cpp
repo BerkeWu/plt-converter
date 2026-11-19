@@ -32,9 +32,12 @@ TileGeom tileGeometry(const Params& p, double w, double h) {
     g.ok = g.fw > 20 && g.fh > 20;
     if (g.ok) {
         // frame k covers u in [strip + k*fw, strip + (k+1)*fw]; the strips outside the first and last frame are printed too,
-        // so n pages reach from u = 0 to n*fw + 2*strip
-        g.nx = std::max(1, static_cast<int>(std::ceil((p.offX + w - 2 * g.strip) / g.fw - 1e-9)));
-        g.ny = std::max(1, static_cast<int>(std::ceil((p.offY + h - 2 * g.strip) / g.fh - 1e-9)));
+        // so n pages reach from u = 0 to n*fw + 2*strip - UNLESS safeOuterMargin is set: then the outer strip (the sides
+        // with no neighbouring page to share the overlap with) is kept as pure buffer, never relied on for unique content,
+        // so n pages must reach u = n*fw on their own (can need one more page/row than the default).
+        const double outerAllowance = p.safeOuterMargin ? 0.0 : 2 * g.strip;
+        g.nx = std::max(1, static_cast<int>(std::ceil((p.offX + w - outerAllowance) / g.fw - 1e-9)));
+        g.ny = std::max(1, static_cast<int>(std::ceil((p.offY + h - outerAllowance) / g.fh - 1e-9)));
     }
     return g;
 }
@@ -244,19 +247,36 @@ Plan buildPlan(const plt::Document& doc, const Params& p) {
             // side (frames abut, each neighbouring pair of windows overlaps by 2*strip split evenly between them)
             const double u0 = c * plan.Wp, v0 = r * plan.Hp;
             const double eps = single ? 1e-6 : 0;
-            for (size_t li = 0; li < L.size(); ++li) clipPolyline(L[li], u0 - plan.strip, v0 - plan.strip, u0 + plan.Wp + plan.strip + eps, v0 + plan.Hp + plan.strip + eps, p.margin - u0, p.margin - v0, LS[li], pg.paths);
+            // safeOuterMargin: on a side with no neighbouring page (the true outside of the whole grid), don't extend
+            // the window into the strip at all - tileGeometry already sized the grid so the core frames alone cover
+            // everything, so nothing real is lost; interior (splicing) sides are unaffected either way.
+            const bool outer = p.safeOuterMargin && !single;
+            const double extL = (outer && c == 0) ? 0 : plan.strip, extR = (outer && c == plan.nx - 1) ? 0 : plan.strip;
+            const double extT = (outer && r == 0) ? 0 : plan.strip, extB = (outer && r == plan.ny - 1) ? 0 : plan.strip;
+            for (size_t li = 0; li < L.size(); ++li) clipPolyline(L[li], u0 - extL, v0 - extT, u0 + plan.Wp + extR + eps, v0 + plan.Hp + extB + eps, p.margin - u0, p.margin - v0, LS[li], pg.paths);
             // a sheet is blank when its FRAME holds no line: lines of neighbours reaching into its strip do not make it necessary.
             // On the outer sides of the grid there is no neighbour, so the strip there belongs to this sheet.
             const double tx0 = c == 0 ? p.margin : plan.inset, tx1 = c == plan.nx - 1 ? plan.pageW - p.margin : plan.pageW - plan.inset;
             const double ty0 = r == 0 ? p.margin : plan.inset, ty1 = r == plan.ny - 1 ? plan.pageH - p.margin : plan.pageH - plan.inset;
             pg.empty = !pathsHitRect(pg.paths, tx0, ty0, tx1, ty1);
-            if (!single && std::find(p.blankLabels.begin(), p.blankLabels.end(), pg.label) != p.blankLabels.end()) { pg.paths.clear(); pg.empty = true; pg.manual = true; }
+            if (!single && std::find(p.blankLabels.begin(), p.blankLabels.end(), pg.label) != p.blankLabels.end()) {
+                // same toggle list serves both directions: a page that naturally has content gets forced blank (content
+                // cleared); a page that's naturally auto-skippable gets forced kept, with whatever it naturally has (its
+                // margin strip, typically) - "empty" then means what it will actually show, not just its core frame.
+                if (!pg.empty) { pg.paths.clear(); pg.empty = true; }
+                else pg.empty = pg.paths.empty();
+                pg.manual = true;
+            }
             grid.push_back(std::move(pg));
         }
 
     for (auto& pg : grid) {
         const bool first = pg.row == 0 && pg.col == 0;
-        if (pg.empty && !pg.manual && !(first && p.calibBox) && p.skipEmpty) { ++plan.blankPages; continue; }
+        if (pg.empty && !pg.manual && !(first && p.calibBox) && p.skipEmpty) {
+            if (!pg.paths.empty()) plan.recoverable.emplace_back(pg.row, pg.col);   // has margin-strip content, just not in its own core frame
+            ++plan.blankPages;
+            continue;
+        }
         if (pg.empty) ++plan.blankPages; else ++plan.effectivePages;
         if (p.alignMarks && !single) addAlignMarks(pg, p, plan.inset);
         addMarks(pg, p, portrait, !single);

@@ -2,6 +2,7 @@
 // origin top-left of the page, Y pointing down). Renderers: pdf_min (dev) and the Qt exporter.
 #pragma once
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "plt.h"
@@ -28,6 +29,11 @@ struct Params {
     bool alignMarks = true;  // registration frame: 4 dashed lines edge to edge + one "+" per frame corner
     bool overview = false;   // 「添加拼接效果图」: scaled overview page placed first, no page number
     bool skipEmpty = true;   // do not output pages without any line
+    bool safeOuterMargin = false;  // keep the margin strip on the grid's OUTER sides (no neighbouring page to splice
+                                    // with) as pure buffer, never relied on for unique content - protects against a
+                                    // printer's own non-printable edge silently losing content there, at the cost of
+                                    // sometimes needing one more page/row than the default. Off by default: the normal
+                                    // "print real content in every margin strip" behaviour (interior AND outer) is unchanged.
     double lineWidth = 0.25;
     double alignR = 0.145, alignG = 0.388, alignB = 0.922;  // alignment marks: blue (#2563EB) by default
     bool useOriginalColors = false;  // use the colours the PLT assigns to pens (PC); pens without a colour use lineR/G/B
@@ -56,7 +62,9 @@ struct Page {
     int row = -1, col = -1;
     bool overview = false;
     bool empty = false;         // contains no pattern line
-    bool manual = false;        // user set this page to blank (never skipped, even when empty pages are)
+    bool manual = false;        // user manually overrode this page's presence (never skipped, even when empty):
+                                 // forces it blank if it had content, forces it kept (with whatever it naturally has,
+                                 // typically only its margin strip) if it was auto-skippable
     std::vector<Path> paths;    // pattern + helper lines
     std::vector<Text> texts;
 };
@@ -72,6 +80,9 @@ struct Plan {
     int effectivePages = 0;            // non-empty pages (what the user must print/assemble)
     bool calibCollision = false;
     std::vector<Page> pages;           // output order (overview last if enabled); skipEmpty applied
+    std::vector<std::pair<int, int>> recoverable;   // (row,col) of pages skipped by skipEmpty whose margin strip still
+                                                     // has real pattern content (not truly blank) - candidates the UI can
+                                                     // offer to click back in, same as a manually-restored page
 };
 
 // Tiling geometry. The registration frame ("拼接框") sits `margin` inside the sheet edge; frames of neighbouring pages abut

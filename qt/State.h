@@ -17,6 +17,7 @@ struct State {
     double margin = 10;       // mm: sheet edge -> 拼接框/页边距线 = the whole strip outside the frame carries overlap pattern
     double offX = 0, offY = 0;
     bool singlePage = false, pageNumbers = true, calibBox = true, alignMarks = true, overview = true, keepBlank = false;
+    bool safeOuterMargin = false;   // 最外圈边距只作安全区，不印唯一内容（可能增加页数）；默认关闭，不影响现有纸样
     QColor alignColor = QColor("#2563EB");   // 拼接对位标记颜色（默认蓝色）
     double calibCm = 5, lineWidth = 0.1;   // 校准框 5 cm, 线宽 0.1 mm
     bool fileTag = false;     // 页码旁附加文件名（单文件；批量用 BatchOptions::fileTag）
@@ -35,7 +36,7 @@ struct State {
         return paper == o.paper && landscape == o.landscape && autoOrient == o.autoOrient && margin == o.margin &&
                offX == o.offX && offY == o.offY && singlePage == o.singlePage &&
                pageNumbers == o.pageNumbers && calibBox == o.calibBox && alignMarks == o.alignMarks &&
-               overview == o.overview && keepBlank == o.keepBlank && calibCm == o.calibCm && lineWidth == o.lineWidth &&
+               overview == o.overview && keepBlank == o.keepBlank && safeOuterMargin == o.safeOuterMargin && calibCm == o.calibCm && lineWidth == o.lineWidth &&
                fileTag == o.fileTag && blanked == o.blanked && color == o.color && alignColor == o.alignColor && origColor == o.origColor && ignoreFrame == o.ignoreFrame && rot == o.rot &&
                mirror == o.mirror && hasSel == o.hasSel && sel == o.sel && selClip == o.selClip;
     }
@@ -61,6 +62,7 @@ inline layout::Params toParams(const State& s) {
     p.alignMarks = s.alignMarks;
     p.overview = s.overview;
     p.skipEmpty = !s.keepBlank;
+    p.safeOuterMargin = s.safeOuterMargin;
     for (const QString& b : s.blanked) p.blankLabels.push_back(b.toStdString());
     p.lineWidth = s.lineWidth;
     p.useOriginalColors = s.origColor;
@@ -77,6 +79,7 @@ inline QJsonObject stateToJson(const State& s) {
     o["margin"] = s.margin; o["offX"] = s.offX; o["offY"] = s.offY;
     o["singlePage"] = s.singlePage; o["pageNumbers"] = s.pageNumbers; o["calibBox"] = s.calibBox;
     o["alignMarks"] = s.alignMarks; o["overview"] = s.overview; o["keepBlank"] = s.keepBlank;
+    o["safeOuterMargin"] = s.safeOuterMargin;
     o["calibCm"] = s.calibCm; o["lineWidth"] = s.lineWidth; o["fileTag"] = s.fileTag;
     o["blanked"] = QJsonArray::fromStringList(s.blanked);
     o["color"] = s.color.name(); o["alignColor"] = s.alignColor.name(); o["origColor"] = s.origColor;
@@ -100,6 +103,7 @@ inline State stateFromJson(const QJsonObject& o) {
     s.singlePage = boo("singlePage", s.singlePage); s.pageNumbers = boo("pageNumbers", s.pageNumbers);
     s.calibBox = boo("calibBox", s.calibBox); s.alignMarks = boo("alignMarks", s.alignMarks);
     s.overview = boo("overview", s.overview); s.keepBlank = boo("keepBlank", s.keepBlank);
+    s.safeOuterMargin = boo("safeOuterMargin", s.safeOuterMargin);   // absent in old templates -> stays false (unchanged behaviour)
     s.calibCm = num("calibCm", s.calibCm); s.lineWidth = num("lineWidth", s.lineWidth);
     QColor c(str("color", s.color.name())); if (c.isValid()) s.color = c;
     QColor a(str("alignColor", s.alignColor.name())); if (a.isValid()) s.alignColor = a;
